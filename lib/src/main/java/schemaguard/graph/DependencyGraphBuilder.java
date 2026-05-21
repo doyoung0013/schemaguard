@@ -10,34 +10,31 @@ import java.util.HashMap;
 /**
  * 파싱 결과를 하나의 방향성 의존성 그래프로 통합한다.
  *
- * 그래프 방향 (엣지 방향 = "영향이 전파되는 방향의 역방향"):
- *   col:users.email  ←(maps)←  field:User.email
- *   field:User.email ←(uses)←  repo:UserRepository.findById
- *   repo:...         ←(calls)← svc:UserService.getUser
- *   svc:...          ←(calls)← ctrl:UserController.getUser
- *   ctrl:...         ←(maps)←  api:GET /users/{id}
+ * 엣지 방향: API → Controller → Service → Repository → Field/FkField → Column
+ * ImpactAnalyzer는 Column 에서 incomingEdges 로 역방향 BFS 탐색한다.
  *
- * 즉, 엣지는 "API → ... → Column" 방향으로 추가된다.
- * ImpactAnalyzer는 Column 에서 출발하여 이 방향의 역방향(incomingEdges)으로 BFS 탐색한다.
+ * FK 관련 추가 엣지:
+ *   fkfield:Post.author  →(fk_maps)→  col:posts.author_id
+ *   repo:PostRepository.*  →(uses)→   fkfield:Post.author
  */
 public class DependencyGraphBuilder {
 
     private final DefaultDirectedGraph<Node, Edge> graph =
             new DefaultDirectedGraph<>(Edge.class);
-
-    /** 노드 id → Node 역조회용 */
     private final Map<String, Node> nodeIndex = new HashMap<>();
 
     // ── 진입점 ────────────────────────────────────────────────────────────────
 
     public DefaultDirectedGraph<Node, Edge> build(
             List<EntityMapping>  entities,
+            List<FkMapping>      fkMappings,
             List<RepositoryInfo> repos,
             List<ServiceInfo>    services,
             List<ControllerInfo> controllers) {
 
         addEntityEdges(entities);
-        addRepositoryEdges(repos, entities);
+        addFkEdges(fkMappings);                      // ← FK 신규
+        addRepositoryEdges(repos, entities, fkMappings); // ← FK 연동
         addServiceEdges(services);
         addControllerEdges(controllers);
 
@@ -47,74 +44,89 @@ public class DependencyGraphBuilder {
     public DefaultDirectedGraph<Node, Edge> getGraph() { return graph; }
     public Map<String, Node> getNodeIndex()            { return nodeIndex; }
 
-    // ── 1단계: Entity → Column 엣지 ──────────────────────────────────────────
+    // ── 1단계: 일반 Entity Field → Column ────────────────────────────────────
 
     private void addEntityEdges(List<EntityMapping> entities) {
         for (EntityMapping em : entities) {
-            Node fieldNode  = getOrCreate(em.getFieldNodeId(),  NodeType.FIELD,
+            Node field  = getOrCreate(em.getFieldNodeId(),  NodeType.FIELD,
                     em.getEntityClass() + "." + em.getFieldName());
-            Node columnNode = getOrCreate(em.getColumnNodeId(), NodeType.COLUMN,
+            Node column = getOrCreate(em.getColumnNodeId(), NodeType.COLUMN,
                     em.getTableName() + "." + em.getColumnName());
-
-            // api → col 방향이므로 field → column
-            addEdge(fieldNode, columnNode, RelationType.MAPS);
+            addEdge(field, column, RelationType.MAPS);
         }
     }
 
-    // ── 2단계: Repository → Field 엣지 ───────────────────────────────────────
+    // ── 2단계: FK_FIELD → Column (FK_MAPS 엣지) ───────────────────────────────
 
-    private void addRepositoryEdges(List<RepositoryInfo> repos, List<EntityMapping> entities) {
+    private void addFkEdges(List<FkMapping> fkMappings) {
+        for (FkMapping fk : fkMappings) {
+            Node fkField = getOrCreate(
+                    fk.getFkFieldNodeId(), NodeType.FK_FIELD,
+                    fk.getEntityClass() + "." + fk.getFieldName()
+                    + " (@" + fk.getFkRelationType() + " → " + fk.getReferencedEntity() + ")");
+
+            Node column = getOrCreate(
+                    fk.getColumnNodeId(), NodeType.COLUMN,
+                    fk.getTableName() + "." + fk.getJoinColumnName());
+
+            addEdge(fkField, column, RelationType.FK_MAPS);
+        }
+    }
+
+    // ── 3단계: Repository → Field / FK_FIELD ─────────────────────────────────
+
+    private void addRepositoryEdges(List<RepositoryInfo> repos,
+                                    List<EntityMapping>  entities,
+                                    List<FkMapping>      fkMappings) {
         for (RepositoryInfo repo : repos) {
             String entityClass = repo.getEntityClass();
 
-            // 이 Repository 가 다루는 Entity 의 모든 필드를 찾아 연결
             List<EntityMapping> relatedFields = entities.stream()
-                    .filter(em -> em.getEntityClass().equals(entityClass))
-                    .toList();
+                    .filter(em -> em.getEntityClass().equals(entityClass)).toList();
+            List<FkMapping> relatedFkFields = fkMappings.stream()
+                    .filter(fk -> fk.getEntityClass().equals(entityClass)).toList();
 
-            for (String methodName : repo.getMethodNames()) {
-                Node repoNode = getOrCreate(
-                        "repo:" + repo.getClassName() + "." + methodName,
-                        NodeType.REPOSITORY,
+            // 선언 메서드 + 기본 CRUD 메서드 모두 처리
+            List<String> allMethods = new java.util.ArrayList<>(repo.getMethodNames());
+            for (String def : List.of("findById", "findAll", "save", "delete", "deleteById", "existsById")) {
+                if (!allMethods.contains(def)) allMethods.add(def);
+            }
+
+            for (String methodName : allMethods) {
+                String nodeId   = "repo:" + repo.getClassName() + "." + methodName;
+                Node repoNode   = getOrCreate(nodeId, NodeType.REPOSITORY,
                         repo.getClassName() + "." + methodName);
 
+                // 일반 필드 연결
                 for (EntityMapping em : relatedFields) {
                     Node fieldNode = getOrCreate(em.getFieldNodeId(), NodeType.FIELD,
                             em.getEntityClass() + "." + em.getFieldName());
                     addEdge(repoNode, fieldNode, RelationType.USES);
                 }
-            }
 
-            // 상속된 기본 CRUD 메서드도 노드로 추가 (findById, save, delete 등)
-            for (String defaultMethod : List.of("findById", "findAll", "save", "delete", "deleteById", "existsById")) {
-                String nodeId = "repo:" + repo.getClassName() + "." + defaultMethod;
-                if (!nodeIndex.containsKey(nodeId)) {
-                    Node repoNode = getOrCreate(nodeId, NodeType.REPOSITORY,
-                            repo.getClassName() + "." + defaultMethod);
-                    for (EntityMapping em : relatedFields) {
-                        Node fieldNode = getOrCreate(em.getFieldNodeId(), NodeType.FIELD,
-                                em.getEntityClass() + "." + em.getFieldName());
-                        addEdge(repoNode, fieldNode, RelationType.USES);
-                    }
+                // FK 필드 연결 (신규)
+                for (FkMapping fk : relatedFkFields) {
+                    Node fkFieldNode = getOrCreate(fk.getFkFieldNodeId(), NodeType.FK_FIELD,
+                            fk.getEntityClass() + "." + fk.getFieldName());
+                    addEdge(repoNode, fkFieldNode, RelationType.USES);
                 }
             }
         }
     }
 
-    // ── 3단계: Service → Repository 엣지 ─────────────────────────────────────
+    // ── 4단계: Service → Repository ──────────────────────────────────────────
 
     private void addServiceEdges(List<ServiceInfo> services) {
         for (ServiceInfo svc : services) {
             for (ServiceInfo.MethodCall call : svc.getMethodCalls()) {
-                Node svcNode  = getOrCreate(
+                Node svcNode = getOrCreate(
                         "svc:" + svc.getClassName() + "." + call.callerMethod,
                         NodeType.SERVICE,
                         svc.getClassName() + "." + call.callerMethod);
 
-                // callee 가 Repository 인지 Service 인지 판단
-                NodeType calleeType = call.calleeClass.contains("Repository")
+                NodeType calleeType   = call.calleeClass.contains("Repository")
                         ? NodeType.REPOSITORY : NodeType.SERVICE;
-                String calleePrefix = calleeType == NodeType.REPOSITORY ? "repo:" : "svc:";
+                String   calleePrefix = calleeType == NodeType.REPOSITORY ? "repo:" : "svc:";
 
                 Node calleeNode = getOrCreate(
                         calleePrefix + call.calleeClass + "." + call.calleeMethod,
@@ -126,7 +138,7 @@ public class DependencyGraphBuilder {
         }
     }
 
-    // ── 4단계: API → Controller → Service 엣지 ───────────────────────────────
+    // ── 5단계: API → Controller → Service ────────────────────────────────────
 
     private void addControllerEdges(List<ControllerInfo> controllers) {
         for (ControllerInfo ctrl : controllers) {
@@ -137,10 +149,8 @@ public class DependencyGraphBuilder {
                         NodeType.CONTROLLER,
                         ctrl.getClassName() + "." + ep.controllerMethod);
 
-                // API → Controller
                 addEdge(apiNode, ctrlNode, RelationType.MAPS);
 
-                // Controller → Service (호출이 파악된 경우만)
                 if (ep.calleeServiceClass != null && ep.calleeServiceMethod != null) {
                     Node svcNode = getOrCreate(
                             "svc:" + ep.calleeServiceClass + "." + ep.calleeServiceMethod,
@@ -163,8 +173,7 @@ public class DependencyGraphBuilder {
     }
 
     private void addEdge(Node from, Node to, RelationType relation) {
-        if (!graph.containsEdge(from, to)) {
+        if (!graph.containsEdge(from, to))
             graph.addEdge(from, to, new Edge(relation));
-        }
     }
 }

@@ -6,35 +6,70 @@ package schemaguard.model;
  */
 public class SchemaChange {
 
-    private final String tableName;    // ex. "users"
-    private final String columnName;   // ex. "email"  (테이블 레벨 변경이면 null)
-    private final String newName;      // RENAME 시 변경 후 이름 (해당 없으면 null)
+	private final String tableName;
+    private final String columnName;      // 컬럼 레벨 변경이 없으면 null
+    private final String newName;         // RENAME 시 변경 후 이름 (없으면 null)
     private final ChangeType changeType;
     private final RiskLevel riskLevel;
-
-    public SchemaChange(String tableName, String columnName, ChangeType changeType, RiskLevel riskLevel) {
-        this(tableName, columnName, null, changeType, riskLevel);
+ 
+    // FK 전용 추가 정보
+    private final String fkName;            // ex. "fk_post_author"  (없으면 null)
+    private final String referencedTable;   // ex. "users"           (없으면 null)
+    private final String referencedColumn;  // ex. "id"              (없으면 null)
+ 
+    // ── 기본 생성자 (non-FK) ──────────────────────────────────────────────────
+ 
+    public SchemaChange(String tableName, String columnName,
+                        ChangeType changeType, RiskLevel riskLevel) {
+        this(tableName, columnName, null, changeType, riskLevel, null, null, null);
     }
-
+ 
     public SchemaChange(String tableName, String columnName, String newName,
                         ChangeType changeType, RiskLevel riskLevel) {
-        this.tableName = tableName;
-        this.columnName = columnName;
-        this.newName = newName;
-        this.changeType = changeType;
-        this.riskLevel = riskLevel;
+        this(tableName, columnName, newName, changeType, riskLevel, null, null, null);
     }
-
-    public String getTableName()    { return tableName; }
-    public String getColumnName()   { return columnName; }
-    public String getNewName()      { return newName; }
-    public ChangeType getChangeType() { return changeType; }
-    public RiskLevel getRiskLevel() { return riskLevel; }
-
+ 
+    // ── FK 생성자 ─────────────────────────────────────────────────────────────
+ 
+    public SchemaChange(String tableName, String columnName, String newName,
+                        ChangeType changeType, RiskLevel riskLevel,
+                        String fkName, String referencedTable, String referencedColumn) {
+        this.tableName        = tableName;
+        this.columnName       = columnName;
+        this.newName          = newName;
+        this.changeType       = changeType;
+        this.riskLevel        = riskLevel;
+        this.fkName           = fkName;
+        this.referencedTable  = referencedTable;
+        this.referencedColumn = referencedColumn;
+    }
+ 
+    public String getTableName()         { return tableName; }
+    public String getColumnName()        { return columnName; }
+    public String getNewName()           { return newName; }
+    public ChangeType getChangeType()    { return changeType; }
+    public RiskLevel getRiskLevel()      { return riskLevel; }
+    public String getFkName()            { return fkName; }
+    public String getReferencedTable()   { return referencedTable; }
+    public String getReferencedColumn()  { return referencedColumn; }
+ 
+    public boolean isFkChange() {
+        return changeType == ChangeType.DROP_FOREIGN_KEY
+            || changeType == ChangeType.DROP_FK_COLUMN
+            || changeType == ChangeType.MODIFY_FK_REFERENCE
+            || changeType == ChangeType.ADD_FOREIGN_KEY;
+    }
+ 
     @Override
     public String toString() {
-        return String.format("[%s] %s on %s.%s",
-                riskLevel, changeType, tableName,
-                columnName != null ? columnName : "(table)");
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format("[%s] %s on %s", riskLevel, changeType, tableName));
+        if (columnName != null)      sb.append(".").append(columnName);
+        if (fkName != null)          sb.append(" (FK: ").append(fkName).append(")");
+        if (referencedTable != null) sb.append(" → ref: ").append(referencedTable)
+                                       .append(".").append(referencedColumn);
+        return sb.toString();
     }
+    
+    
 }

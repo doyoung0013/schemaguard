@@ -18,7 +18,7 @@ public class Node {
 
     private final String id;
     private final NodeType type;
-    private final String name;   // 사람이 읽기 좋은 표시 이름
+    private final String name;
 
     public Node(String id, NodeType type, String name) {
         this.id = id;
