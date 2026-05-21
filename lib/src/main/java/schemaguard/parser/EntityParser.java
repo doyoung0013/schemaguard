@@ -9,41 +9,33 @@ import com.github.javaparser.ast.expr.MemberValuePair;
 import com.github.javaparser.ast.expr.NormalAnnotationExpr;
 import com.github.javaparser.ast.expr.SingleMemberAnnotationExpr;
 import com.github.javaparser.ast.nodeTypes.NodeWithAnnotations;
-import schemaguard.model.FkMapping;
 import schemaguard.model.EntityMapping;
+import schemaguard.model.FkMapping;
 
 import java.io.File;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Optional;
-import java.util.Set;
+import java.util.*;
 
-
-/**
- * @Entity 클래스를 파싱하여 두 가지 매핑 정보를 추출한다.
- *
- * 1) EntityMapping  : 일반 필드 ↔ DB 컬럼 매핑 (@Column)
- * 2) FkMapping      : FK 연관관계 필드 ↔ DB FK 컬럼 매핑 (@ManyToOne, @OneToMany, @JoinColumn)
- */
 public class EntityParser {
 
-    /** FK 연관관계 어노테이션 집합 */
     private static final Set<String> FK_ANNOTATIONS =
             Set.of("ManyToOne", "OneToMany", "OneToOne", "ManyToMany");
 
     // ── 진입점 ────────────────────────────────────────────────────────────────
 
     public ParseResult parse(File javaFile) throws Exception {
-        return extract(StaticJavaParser.parse(javaFile));
+        CompilationUnit cu = StaticJavaParser.parse(javaFile);
+        // 소스 루트 기준 상대경로로 변환하기 위해 절대경로를 그대로 전달
+        // DependencyGraphBuilder 에서 소스 루트 기준으로 정규화한다
+        return extract(cu, javaFile.getAbsolutePath());
     }
 
     public ParseResult parseSource(String sourceCode) throws Exception {
-        return extract(StaticJavaParser.parse(sourceCode));
+        return extract(StaticJavaParser.parse(sourceCode), null);
     }
 
-    // ── 내부 파싱 로직 ────────────────────────────────────────────────────────
+    // ── 파싱 ─────────────────────────────────────────────────────────────────
 
-    private ParseResult extract(CompilationUnit cu) {
+    private ParseResult extract(CompilationUnit cu, String filePath) {
         List<EntityMapping> entityMappings = new ArrayList<>();
         List<FkMapping>     fkMappings     = new ArrayList<>();
 
@@ -59,35 +51,33 @@ public class EntityParser {
 
                 String fieldName = field.getVariable(0).getNameAsString();
 
-                // ── FK 연관관계 필드 ───────────────────────────────────────────
-                if (hasFkAnnotation(field)) {
-                    String fkRelationType = detectFkRelationType(field);
-                    String referencedEntity = field.getElementType().asString()
-                            .replaceAll("<.*>", "").trim(); // List<User> → User
+                // 필드 선언 라인 번호
+                int line = field.getRange()
+                        .map(r -> r.begin.line)
+                        .orElse(-1);
 
-                    // @JoinColumn(name="author_id") 에서 FK 컬럼명 추출
-                    // 없으면 필드명 + "_id" 관례 적용
-                    String joinColumnName = getAnnotationValue(field, "JoinColumn", "name")
+                if (hasFkAnnotation(field)) {
+                    // FK 필드
+                    String fkRelationType  = detectFkRelationType(field);
+                    String referencedEntity = field.getElementType().asString()
+                            .replaceAll("<.*>", "").trim();
+                    String joinColumnName  = getAnnotationValue(field, "JoinColumn", "name")
                             .orElse(toSnakeCase(fieldName) + "_id");
 
-                    // @OneToMany 는 보통 FK 컬럼이 반대쪽 테이블에 있으므로
-                    // joinColumn 이 없는 경우 컬럼 노드 연결을 생략해도 무방하지만,
-                    // @JoinColumn 이 명시된 경우는 포함한다.
                     if (fkRelationType.equals("OneToMany")
-                            && !hasAnnotation(field, "JoinColumn")) {
-                        return; // mappedBy 쪽은 FK 컬럼을 직접 소유하지 않음
-                    }
+                            && !hasAnnotation(field, "JoinColumn")) return;
 
                     fkMappings.add(new FkMapping(
                             className, fieldName, tableName,
-                            joinColumnName, referencedEntity, fkRelationType));
-                }
-
-                // ── 일반 필드 ──────────────────────────────────────────────────
-                else {
+                            joinColumnName, referencedEntity, fkRelationType,
+                            filePath, line));               // ← 위치 정보
+                } else {
+                    // 일반 필드
                     String columnName = getAnnotationValue(field, "Column", "name")
                             .orElse(toSnakeCase(fieldName));
-                    entityMappings.add(new EntityMapping(className, fieldName, tableName, columnName));
+                    entityMappings.add(new EntityMapping(
+                            className, fieldName, tableName, columnName,
+                            filePath, line));               // ← 위치 정보
                 }
             }
         });
@@ -98,8 +88,7 @@ public class EntityParser {
     // ── 어노테이션 헬퍼 ──────────────────────────────────────────────────────
 
     private boolean hasAnnotation(NodeWithAnnotations<?> node, String name) {
-        return node.getAnnotations().stream()
-                .anyMatch(a -> a.getNameAsString().equals(name));
+        return node.getAnnotations().stream().anyMatch(a -> a.getNameAsString().equals(name));
     }
 
     private boolean hasFkAnnotation(FieldDeclaration field) {
@@ -111,50 +100,37 @@ public class EntityParser {
         return field.getAnnotations().stream()
                 .map(AnnotationExpr::getNameAsString)
                 .filter(FK_ANNOTATIONS::contains)
-                .findFirst()
-                .orElse("Unknown");
+                .findFirst().orElse("Unknown");
     }
 
     private Optional<String> getAnnotationValue(NodeWithAnnotations<?> node,
-                                                 String annotationName,
-                                                 String attributeName) {
+                                                 String annName, String attrName) {
         for (AnnotationExpr ann : node.getAnnotations()) {
-            if (!ann.getNameAsString().equals(annotationName)) continue;
-
+            if (!ann.getNameAsString().equals(annName)) continue;
             if (ann instanceof NormalAnnotationExpr normal) {
-                for (MemberValuePair pair : normal.getPairs()) {
-                    if (pair.getNameAsString().equals(attributeName)) {
-                        return Optional.of(stripQuotes(pair.getValue().toString()));
-                    }
-                }
+                for (MemberValuePair p : normal.getPairs())
+                    if (p.getNameAsString().equals(attrName))
+                        return Optional.of(stripQuotes(p.getValue().toString()));
             } else if (ann instanceof SingleMemberAnnotationExpr single) {
-                if (attributeName.equals("name") || attributeName.equals("value")) {
+                if (attrName.equals("name") || attrName.equals("value"))
                     return Optional.of(stripQuotes(single.getMemberValue().toString()));
-                }
             }
         }
         return Optional.empty();
     }
 
-    // ── 문자열 유틸 ──────────────────────────────────────────────────────────
+    // ── 유틸 ─────────────────────────────────────────────────────────────────
 
     public static String toSnakeCase(String camel) {
-        return camel
-                .replaceAll("([A-Z]+)([A-Z][a-z])", "$1_$2")
-                .replaceAll("([a-z])([A-Z])", "$1_$2")
-                .toLowerCase();
+        return camel.replaceAll("([A-Z]+)([A-Z][a-z])", "$1_$2")
+                    .replaceAll("([a-z])([A-Z])", "$1_$2")
+                    .toLowerCase();
     }
 
-    private String stripQuotes(String s) {
-        return s.replaceAll("^\"|\"$", "");
-    }
+    private String stripQuotes(String s) { return s.replaceAll("^\"|\"$", ""); }
 
     // ── 반환 타입 ─────────────────────────────────────────────────────────────
 
-    /**
-     * EntityParser 파싱 결과를 담는 컨테이너.
-     * 일반 매핑과 FK 매핑을 함께 반환한다.
-     */
     public record ParseResult(
             List<EntityMapping> entityMappings,
             List<FkMapping>     fkMappings

@@ -1,35 +1,39 @@
 package schemaguard.model;
 
-/**
- * Entity 클래스에서 추출한 Java 필드 ↔ DB 컬럼 매핑 정보.
- *
- * ex. User.email  ↔  users.email
- */
 public class EntityMapping {
 
-    private final String entityClass;   // ex. "User"
-    private final String fieldName;     // ex. "email"
-    private final String tableName;     // ex. "users"
-    private final String columnName;    // ex. "email"  (@Column(name=...) 우선, 없으면 필드명 snake_case 변환)
+    private final String entityClass;
+    private final String fieldName;
+    private final String tableName;
+    private final String columnName;
+    private final String filePath;    // 소스 파일 경로 (null 가능)
+    private final int    lineNumber;  // 필드 선언 라인 (-1 이면 미정)
 
     public EntityMapping(String entityClass, String fieldName,
-                         String tableName, String columnName) {
+                         String tableName,  String columnName) {
+        this(entityClass, fieldName, tableName, columnName, null, -1);
+    }
+
+    public EntityMapping(String entityClass, String fieldName,
+                         String tableName,  String columnName,
+                         String filePath,   int lineNumber) {
         this.entityClass = entityClass;
         this.fieldName   = fieldName;
         this.tableName   = tableName;
         this.columnName  = columnName;
+        this.filePath    = filePath;
+        this.lineNumber  = lineNumber;
     }
 
     public String getEntityClass() { return entityClass; }
     public String getFieldName()   { return fieldName; }
     public String getTableName()   { return tableName; }
     public String getColumnName()  { return columnName; }
+    public String getFilePath()    { return filePath; }
+    public int    getLineNumber()  { return lineNumber; }
 
-    /** 그래프 노드 ID: FIELD 타입 */
     public String getFieldNodeId()  { return "field:" + entityClass + "." + fieldName; }
-
-    /** 그래프 노드 ID: COLUMN 타입 */
-    public String getColumnNodeId() { return "col:" + tableName + "." + columnName; }
+    public String getColumnNodeId() { return "col:"   + tableName   + "." + columnName; }
 
     @Override
     public String toString() {

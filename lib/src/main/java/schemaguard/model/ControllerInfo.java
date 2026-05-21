@@ -3,54 +3,66 @@ package schemaguard.model;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Controller 클래스에서 추출한 정보.
- * API 엔드포인트와 Controller 메서드 간의 매핑, 그리고 Service 호출 관계를 담는다.
- */
 public class ControllerInfo {
 
-    private final String className;   // ex. "UserController"
+    private final String className;
+    private final String filePath;
+    private final int    classLine;
+
     private final List<EndpointMapping> endpoints = new ArrayList<>();
 
     public ControllerInfo(String className) {
+        this(className, null, -1);
+    }
+
+    public ControllerInfo(String className, String filePath, int classLine) {
         this.className = className;
+        this.filePath  = filePath;
+        this.classLine = classLine;
     }
 
     public void addEndpoint(String httpMethod, String path,
-                            String controllerMethod,
-                            String calleeServiceClass, String calleeServiceMethod) {
+                            String controllerMethod, int methodLine,
+                            String calleeServiceClass, String calleeServiceMethod,
+                            int serviceCallLine) {
         endpoints.add(new EndpointMapping(
-                httpMethod, path, controllerMethod,
-                calleeServiceClass, calleeServiceMethod));
+                httpMethod, path, controllerMethod, methodLine,
+                calleeServiceClass, calleeServiceMethod, serviceCallLine));
     }
 
-    public String getClassName()                   { return className; }
-    public List<EndpointMapping> getEndpoints()    { return endpoints; }
+    public String                  getClassName() { return className; }
+    public String                  getFilePath()  { return filePath; }
+    public int                     getClassLine() { return classLine; }
+    public List<EndpointMapping>   getEndpoints() { return endpoints; }
 
-    // ── 내부 레코드 ──────────────────────────────────────────────────────────
+    // ── 내부 레코드 ───────────────────────────────────────────────────────────
+
     public static class EndpointMapping {
-        public final String httpMethod;           // ex. "GET"
-        public final String path;                 // ex. "/users/{id}"
-        public final String controllerMethod;     // ex. "getUser"
-        public final String calleeServiceClass;   // ex. "UserService"
-        public final String calleeServiceMethod;  // ex. "getUser"
+        public final String httpMethod;
+        public final String path;
+        public final String controllerMethod;
+        public final int    methodLine;          // @GetMapping 메서드 선언 라인
+        public final String calleeServiceClass;
+        public final String calleeServiceMethod;
+        public final int    serviceCallLine;     // service 호출 표현식 라인
 
         public EndpointMapping(String httpMethod, String path,
-                               String controllerMethod,
-                               String calleeServiceClass, String calleeServiceMethod) {
+                               String controllerMethod, int methodLine,
+                               String calleeServiceClass, String calleeServiceMethod,
+                               int serviceCallLine) {
             this.httpMethod          = httpMethod;
             this.path                = path;
             this.controllerMethod    = controllerMethod;
+            this.methodLine          = methodLine;
             this.calleeServiceClass  = calleeServiceClass;
             this.calleeServiceMethod = calleeServiceMethod;
+            this.serviceCallLine     = serviceCallLine;
         }
 
-        /** API 노드 ID: "api:GET /users/{id}" */
         public String apiNodeId() {
             return "api:" + httpMethod + " " + path;
         }
 
-        /** Controller 노드 ID: "ctrl:UserController.getUser" */
         public String controllerNodeId(String className) {
             return "ctrl:" + className + "." + controllerMethod;
         }

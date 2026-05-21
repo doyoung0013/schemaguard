@@ -2,29 +2,11 @@ package schemaguard.report;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
-import schemaguard.model.AffectedApi;
-import schemaguard.model.ImpactResult;
-import schemaguard.model.RiskLevel;
+import schemaguard.model.*;
 
 import java.io.File;
 import java.util.*;
 
-/**
- * 분석 결과를 JSON 파일로 저장한다. (GitHub Actions CI/CD 연동용)
- *
- * 출력 예시:
- * {
- *   "summary": { "high": 2, "medium": 0, "low": 0, "hasHighRisk": true },
- *   "affectedApis": [
- *     {
- *       "apiId": "GET /users/{id}",
- *       "riskLevel": "HIGH",
- *       "cause": "[HIGH] DROP_COLUMN on users.email",
- *       "impactPath": ["col:users.email", "field:User.email", ...]
- *     }
- *   ]
- * }
- */
 public class JsonReporter implements ReportGenerator {
 
     private final String outputPath;
@@ -32,7 +14,7 @@ public class JsonReporter implements ReportGenerator {
 
     public JsonReporter(String outputPath) {
         this.outputPath = outputPath;
-        this.mapper = new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
+        this.mapper     = new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
     }
 
     @Override
@@ -52,10 +34,23 @@ public class JsonReporter implements ReportGenerator {
             List<Map<String, Object>> apiList = new ArrayList<>();
             for (AffectedApi api : result.getAffectedApis()) {
                 Map<String, Object> entry = new LinkedHashMap<>();
-                entry.put("apiId",       api.getApiId());
-                entry.put("riskLevel",   api.getRiskLevel().name());
-                entry.put("cause",       api.getCause().toString());
-                entry.put("impactPath",  api.getImpactPath());
+                entry.put("apiId",      api.getApiId());
+                entry.put("riskLevel",  api.getRiskLevel().name());
+                entry.put("cause",      formatCause(api.getCause()));
+                entry.put("isFkChange", api.getCause().isFkChange());
+
+                // 위치 정보 포함 경로
+                List<Map<String, Object>> pathList = new ArrayList<>();
+                for (Node node : api.getImpactNodes()) {
+                    Map<String, Object> nodeMap = new LinkedHashMap<>();
+                    nodeMap.put("id",       node.getId());
+                    nodeMap.put("type",     node.getType().name());
+                    nodeMap.put("name",     node.getName());
+                    nodeMap.put("filePath", node.getFilePath());
+                    nodeMap.put("line",     node.getLineNumber() > 0 ? node.getLineNumber() : null);
+                    pathList.add(nodeMap);
+                }
+                entry.put("impactPath", pathList);
                 apiList.add(entry);
             }
             root.put("affectedApis", apiList);
@@ -66,5 +61,16 @@ public class JsonReporter implements ReportGenerator {
         } catch (Exception e) {
             System.err.println("Failed to write JSON report: " + e.getMessage());
         }
+    }
+
+    private Map<String, Object> formatCause(SchemaChange c) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("type",             c.getChangeType().name());
+        m.put("table",            c.getTableName());
+        m.put("column",           c.getColumnName());
+        m.put("fkName",           c.getFkName());
+        m.put("referencedTable",  c.getReferencedTable());
+        m.put("referencedColumn", c.getReferencedColumn());
+        return m;
     }
 }

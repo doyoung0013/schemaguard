@@ -92,6 +92,7 @@ public class SchemaGuardCLI implements Callable<Integer> {
             System.out.println();
 
             DependencyGraphBuilder builder = new DependencyGraphBuilder();
+            builder.setSourceRoot(sourcePath);   // ← 파일 위치를 상대경로로 정규화하기 위해 필요
             builder.build(entities, fkMappings, repos, services, controllers);
 
             ImpactAnalyzer analyzer = new ImpactAnalyzer(builder.getGraph(), builder.getNodeIndex());

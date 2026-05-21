@@ -3,32 +3,57 @@ package schemaguard.model;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Repository 클래스에서 추출한 정보.
- */
 public class RepositoryInfo {
 
-    private final String className;      // ex. "UserRepository"
-    private final String entityClass;    // JpaRepository<User, Long> 에서 추출한 "User"
-    private final List<String> methodNames = new ArrayList<>();  // ex. ["findById", "findByEmail"]
-    private final List<String> jpqlQueries = new ArrayList<>();  // @Query 어노테이션의 JPQL 문자열
-    private final List<String> nativeQueries = new ArrayList<>(); // nativeQuery=true 인 SQL 문자열
+    private final String className;
+    private final String entityClass;
+    private final String filePath;    // 인터페이스 파일 경로
+    private final int    classLine;   // 인터페이스 선언 라인
+
+    // 메서드명 + 라인 번호를 함께 보관
+    private final List<MethodEntry> methods        = new ArrayList<>();
+    private final List<String>      jpqlQueries    = new ArrayList<>();
+    private final List<String>      nativeQueries  = new ArrayList<>();
 
     public RepositoryInfo(String className, String entityClass) {
-        this.className   = className;
-        this.entityClass = entityClass;
+        this(className, entityClass, null, -1);
     }
 
-    public void addMethod(String methodName)       { methodNames.add(methodName); }
-    public void addJpqlQuery(String jpql)          { jpqlQueries.add(jpql); }
-    public void addNativeQuery(String sql)         { nativeQueries.add(sql); }
+    public RepositoryInfo(String className, String entityClass,
+                          String filePath, int classLine) {
+        this.className   = className;
+        this.entityClass = entityClass;
+        this.filePath    = filePath;
+        this.classLine   = classLine;
+    }
 
-    public String getClassName()            { return className; }
-    public String getEntityClass()          { return entityClass; }
-    public List<String> getMethodNames()    { return methodNames; }
-    public List<String> getJpqlQueries()    { return jpqlQueries; }
-    public List<String> getNativeQueries()  { return nativeQueries; }
+    public void addMethod(String methodName, int lineNumber) {
+        methods.add(new MethodEntry(methodName, lineNumber));
+    }
 
-    /** 그래프 노드 ID prefix: "repo:UserRepository." */
-    public String nodeIdPrefix() { return "repo:" + className + "."; }
+    public void addJpqlQuery(String jpql, int lineNumber)   { jpqlQueries.add(jpql); }
+    public void addNativeQuery(String sql, int lineNumber)  { nativeQueries.add(sql); }
+
+    public String getClassName()               { return className; }
+    public String getEntityClass()             { return entityClass; }
+    public String getFilePath()                { return filePath; }
+    public int    getClassLine()               { return classLine; }
+    public List<MethodEntry> getMethods()      { return methods; }
+    public List<String> getJpqlQueries()       { return jpqlQueries; }
+    public List<String> getNativeQueries()     { return nativeQueries; }
+
+    /** 기존 코드 호환용: 메서드명 리스트만 반환 */
+    public List<String> getMethodNames() {
+        return methods.stream().map(MethodEntry::name).toList();
+    }
+
+    /** 메서드명으로 라인 번호 조회 */
+    public int getMethodLine(String methodName) {
+        return methods.stream()
+                .filter(e -> e.name().equals(methodName))
+                .map(MethodEntry::lineNumber)
+                .findFirst().orElse(-1);
+    }
+
+    public record MethodEntry(String name, int lineNumber) {}
 }
