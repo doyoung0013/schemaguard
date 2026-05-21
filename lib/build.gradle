@@ -1,9 +1,19 @@
 plugins {
     id 'java'
+    id 'application'
 }
 
 repositories {
     mavenCentral()
+}
+
+application {
+    mainClass = 'schemaguard.SchemaGuardMain'
+}
+
+tasks.withType(JavaExec).configureEach {
+    jvmArgs '-Dfile.encoding=UTF-8'
+    systemProperty 'file.encoding', 'UTF-8'
 }
 
 dependencies {
@@ -39,7 +49,7 @@ tasks.named('test') {
 jar {
     manifest {
         attributes(
-            'Main-Class': 'com.schemaguard.SchemaGuardMain'
+            'Main-Class': 'schemaguard.SchemaGuardMain'
         )
     }
 }
