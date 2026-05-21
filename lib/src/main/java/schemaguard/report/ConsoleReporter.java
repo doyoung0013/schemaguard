@@ -4,12 +4,8 @@ import schemaguard.model.AffectedApi;
 import schemaguard.model.ChangeType;
 import schemaguard.model.ImpactResult;
 import schemaguard.model.RiskLevel;
-
 import java.util.List;
 
-/**
- * 분석 결과를 콘솔(stdout)에 사람이 읽기 좋은 형태로 출력한다.
- */
 public class ConsoleReporter implements ReportGenerator {
 
     private static final String RESET  = "\u001B[0m";
@@ -84,10 +80,6 @@ public class ConsoleReporter implements ReportGenerator {
             System.out.println(color + "  [" + (i + 1) + "] ❌ " + api.getApiId() + RESET);
             System.out.println("      Cause  : " + api.getCause());
             System.out.println("      Risk   : " + api.getRiskLevel());
-
-            System.out.println("      영향 흐름:");
-            System.out.println("        " + buildSummaryFlow(api));
-            System.out.println();
 
             System.out.println("      상세 경로:");
             printFriendlyPath(api.getImpactPath());
