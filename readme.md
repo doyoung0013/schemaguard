@@ -130,6 +130,347 @@ $env:SCHEMAGUARD_LANG="en"
 
 ---
 
+## ⚙️ GitHub Actions 연동 방법
+
+SchemaGuard는 GitHub Actions와 연동하여 Pull Request 또는 main 브랜치 병합 과정에서 자동으로 실행할 수 있습니다.
+
+이를 통해 개발자가 DB 스키마 변경을 포함한 코드를 PR로 올렸을 때, SchemaGuard가 자동으로 SQL 마이그레이션 파일을 분석하고 Java 코드 영향 범위를 검사할 수 있습니다.
+
+---
+
+### 1) GitHub Actions Workflow 폴더 생성
+
+검사 대상 Spring Boot 프로젝트의 루트 경로에 다음 폴더를 생성합니다.
+
+```text
+.github/workflows/
+```
+
+예시 구조:
+
+```text
+community/
+├── src/
+│   └── main/
+│       ├── java/
+│       └── resources/
+│           └── db/
+│               └── migration/
+├── .github/
+│   └── workflows/
+│       └── schemaguard.yml
+└── build.gradle
+```
+
+---
+
+### 2) yml 파일 생성
+
+`.github/workflows/` 폴더 안에 GitHub Actions Workflow 파일을 생성합니다.
+
+파일명:
+
+```text
+schemaguard.yml
+```
+
+---
+
+### 3) Workflow 내용 작성
+
+생성한 `schemaguard.yml` 파일에 아래 제공된 GitHub Actions 설정 코드를 복사하여 붙여넣습니다.
+
+
+```yaml
+name: SchemaGuard - Schema Change Analysis
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '**.sql'
+
+jobs:
+  schema-guard:
+    name: Analyze Schema Changes
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. 검사 대상 프로젝트 체크아웃
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 2. SchemaGuard 별도 레포 클론
+      - name: Clone SchemaGuard
+        run: |
+          git clone https://github.com/doyoung0013/schemaguard.git $GITHUB_WORKSPACE/schemaguard
+
+      # 3. Java 17 세팅
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      # 4. Gradle 캐시
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/schemaguard/**/*.gradle*', '**/schemaguard/**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      # 5. gradlew 실행 권한 부여
+      - name: Grant execute permission for gradlew
+        run: chmod +x $GITHUB_WORKSPACE/schemaguard/gradlew
+
+      # 6. PR에서 변경된 SQL 마이그레이션 파일 감지
+      - name: Detect changed SQL migration files
+        id: changed-sql
+        run: |
+          CHANGED_SQL=$(git diff --name-only origin/${{ github.base_ref }}...HEAD \
+            | grep -E 'src/main/resources/db/migration/.*\.sql$' \
+            || true)
+
+          echo "변경된 SQL 파일 목록:"
+          echo "$CHANGED_SQL"
+
+          if [ -z "$CHANGED_SQL" ]; then
+            echo "sql_changed=false" >> $GITHUB_OUTPUT
+          else
+            SQL_LIST=$(echo "$CHANGED_SQL" | tr '\n' ' ' | xargs)
+            echo "sql_changed=true" >> $GITHUB_OUTPUT
+            echo "sql_files=$SQL_LIST" >> $GITHUB_OUTPUT
+          fi
+
+      # 7. 변경된 SQL 없으면 스킵
+      - name: Skip if no SQL changes
+        if: steps.changed-sql.outputs.sql_changed == 'false'
+        run: echo "✅ 마이그레이션 SQL 변경 없음. SchemaGuard 스킵."
+
+      # 8. SchemaGuard 실행
+      - name: Run SchemaGuard
+        if: steps.changed-sql.outputs.sql_changed == 'true'
+        env:
+          SCHEMAGUARD_LANG: en
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/build/reports
+
+          for SQL_FILE in ${{ steps.changed-sql.outputs.sql_files }}; do
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "🔍 분석 중: $SQL_FILE"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+            SQL_BASENAME=$(basename "$SQL_FILE" .sql)
+            REPORT_PATH="$GITHUB_WORKSPACE/build/reports/schemaguard-${SQL_BASENAME}.json"
+
+            cd $GITHUB_WORKSPACE/schemaguard
+            ./gradlew run --args="\
+              --source $GITHUB_WORKSPACE/src/main/java \
+              --migration $GITHUB_WORKSPACE/$SQL_FILE \
+              --report-path $REPORT_PATH"
+            cd $GITHUB_WORKSPACE
+          done
+
+      # 9. hasHighRisk 기반으로 병합 차단 판단 + Step Summary 출력
+      - name: Check for HIGH risk
+        if: steps.changed-sql.outputs.sql_changed == 'true'
+        run: |
+          HIGH_FOUND=false
+          SUMMARY_BODY=""
+
+          for REPORT in $GITHUB_WORKSPACE/build/reports/schemaguard-*.json; do
+            echo "📄 리포트 확인: $REPORT"
+
+            SUMMARY_BODY+=$(python3 -c "
+          import json, sys
+
+          with open('$REPORT') as f:
+              data = json.load(f)
+
+          summary = data.get('summary', {})
+          apis    = data.get('affectedApis', [])
+
+          high   = summary.get('high', 0)
+          medium = summary.get('medium', 0)
+          low    = summary.get('low', 0)
+          has_high = summary.get('hasHighRisk', False)
+
+          overall = '🔴 HIGH' if has_high else ('🟡 MEDIUM' if medium > 0 else '🟢 LOW')
+
+          lines = []
+          lines.append('## 🛡️ SchemaGuard Report')
+          lines.append('')
+          lines.append('### 📌 요약')
+          lines.append('')
+          lines.append('| 항목 | 값 |')
+          lines.append('|---|---|')
+          lines.append(f'| 전체 위험도 | {overall} |')
+          lines.append(f'| 🔴 HIGH     | {high}건 |')
+          lines.append(f'| 🟡 MEDIUM   | {medium}건 |')
+          lines.append(f'| 🟢 LOW      | {low}건 |')
+          lines.append(f'| 영향 API 수 | {len(apis)}개 |')
+          lines.append('')
+
+          if apis:
+              lines.append('### 🔥 영향받는 API 목록')
+              lines.append('')
+              lines.append('| # | API | 위험도 | 변경 유형 | 테이블.컬럼 |')
+              lines.append('|---|-----|--------|-----------|------------|')
+
+              for i, api in enumerate(apis, 1):
+                  risk  = api.get('riskLevel', '-')
+                  badge = '🔴' if risk == 'HIGH' else ('🟡' if risk == 'MEDIUM' else '🟢')
+                  cause = api.get('cause', {})
+                  change_type = cause.get('type', '-')
+                  col  = cause.get('column') or '-'
+                  tbl  = cause.get('table') or '-'
+                  lines.append(f'| {i} | \`{api.get(\"apiId\",\"-\")}\` | {badge} {risk} | {change_type} | {tbl}.{col} |')
+
+              lines.append('')
+              lines.append('### 🛠️ 상세 영향 경로')
+              lines.append('')
+
+              for api in apis:
+                  risk  = api.get('riskLevel', '-')
+                  badge = '🔴' if risk == 'HIGH' else ('🟡' if risk == 'MEDIUM' else '🟢')
+                  lines.append(f'<details>')
+                  lines.append(f'<summary>{badge} <strong>{api.get(\"apiId\", \"-\")}</strong> ({risk})</summary>')
+                  lines.append('')
+                  cause = api.get('cause', {})
+                  lines.append(f'**변경 원인:** {cause.get(\"type\",\"-\")} on {cause.get(\"table\",\"-\")}.{cause.get(\"column\",\"-\")}')
+                  lines.append('')
+                  lines.append('**영향 경로:**')
+                  lines.append('')
+                  lines.append('\`\`\`')
+                  for node in api.get('impactPath', []):
+                      node_type = node.get('type', '')
+                      name      = node.get('name', '')
+                      fp        = node.get('filePath', '')
+                      line      = node.get('line')
+                      loc = f'  ({fp}:{line})' if line else (f'  ({fp})' if fp else '')
+                      lines.append(f'  -> [{node_type}] {name}{loc}')
+                  lines.append('\`\`\`')
+                  lines.append('')
+                  lines.append('</details>')
+                  lines.append('')
+
+          print('\n'.join(lines))
+          ")
+
+            # hasHighRisk 체크
+            HAS_HIGH=$(python3 -c "
+          import json
+          with open('$REPORT') as f:
+              data = json.load(f)
+          print(data.get('summary', {}).get('hasHighRisk', False))
+          ")
+
+            if [ "$HAS_HIGH" = "True" ]; then
+              HIGH_FOUND=true
+            fi
+          done
+
+          # Step Summary 작성
+          echo "$SUMMARY_BODY" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$HIGH_FOUND" = "true" ]; then
+            # 실패 배너도 Summary에 추가
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "---" >> $GITHUB_STEP_SUMMARY
+            echo "## ❌ 병합 차단됨" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "> 🚨 **HIGH 위험도 스키마 변경이 감지되었습니다.**" >> $GITHUB_STEP_SUMMARY
+            echo "> 영향받는 코드를 수정한 뒤 PR을 다시 올려주세요." >> $GITHUB_STEP_SUMMARY
+
+            echo "🚨 HIGH 위험도 감지 → 병합 차단"
+            exit 1
+          else
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "---" >> $GITHUB_STEP_SUMMARY
+            echo "## ✅ 병합 가능" >> $GITHUB_STEP_SUMMARY
+            echo "> HIGH 위험도 없음. 안전하게 병합할 수 있습니다." >> $GITHUB_STEP_SUMMARY
+
+            echo "✅ HIGH 위험도 없음. 병합 가능합니다."
+          fi
+
+      # 10. 리포트 Artifact 업로드 (성공/실패 무관하게 항상 실행)
+      - name: Upload SchemaGuard reports
+        if: always() && steps.changed-sql.outputs.sql_changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: schemaguard-reports
+          path: ${{ github.workspace }}/build/reports/schemaguard-*.json
+          retention-days: 30
+```
+
+
+---
+
+### 4) CI/CD 연동 확인
+
+Workflow 파일을 추가한 뒤 main 브랜치 또는 PR에 변경사항을 push하면 GitHub Actions가 자동으로 실행됩니다.
+
+실행 흐름은 다음과 같습니다.
+
+```text
+PR 생성 또는 main 브랜치 push
+→ GitHub Actions 실행
+→ SchemaGuard 저장소 clone
+→ SQL 마이그레이션 파일 분석
+→ Java 코드 영향 범위 분석
+→ JSON 리포트 생성
+→ 위험도에 따라 PR 병합 가능 여부 판단
+```
+
+---
+
+### 5) HIGH 위험도 탐지 시 동작
+
+SchemaGuard 분석 결과 HIGH 위험도 변경이 탐지되면 GitHub Actions 실행을 실패 처리할 수 있습니다.
+
+이를 통해 위험한 DB 스키마 변경이 main 브랜치에 병합되기 전에 자동으로 차단됩니다.
+
+예시 상황:
+
+```sql
+ALTER TABLE users DROP COLUMN email;
+```
+
+위와 같이 기존 Java 코드에서 사용 중인 컬럼이 삭제되는 경우, SchemaGuard는 해당 컬럼과 연결된 Entity, Repository, Service, Controller, API 경로를 추적합니다.
+
+HIGH 위험도가 탐지되면 GitHub Actions는 실패 상태가 되며, 개발자는 병합 전에 영향을 받는 코드를 수정할 수 있습니다.
+
+---
+
+### 6) 분석 리포트 확인
+
+GitHub Actions 실행이 완료되면 Artifact에서 SchemaGuard 분석 리포트를 다운로드할 수 있습니다.
+
+리포트 경로 예시:
+
+```text
+build/reports/schemaguard-report.json
+```
+
+리포트에는 다음 정보가 포함됩니다.
+
+```text
+- 감지된 DB 스키마 변경 유형
+- 변경 대상 테이블 및 컬럼
+- 위험도
+- 영향받는 Entity, Repository, Service, Controller
+- 영향받는 API 엔드포인트
+- 수정 가이드
+```
+---
+
 ## 📋 리포트 출력 예시
 
 ```
