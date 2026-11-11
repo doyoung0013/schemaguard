@@ -4,15 +4,18 @@ import schemaguard.model.ChangeType;
 import schemaguard.model.RiskLevel;
 import schemaguard.model.SchemaChange;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
+import net.sf.jsqlparser.schema.Table;
 import net.sf.jsqlparser.statement.Statement;
 import net.sf.jsqlparser.statement.alter.Alter;
 import net.sf.jsqlparser.statement.alter.AlterExpression;
+import net.sf.jsqlparser.statement.alter.RenameTableStatement;
 import net.sf.jsqlparser.statement.drop.Drop;
 
 import java.io.File;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -126,6 +129,20 @@ public class MigrationParser {
         }
         if (stmt instanceof Drop drop) {
             return List.of(handleDrop(drop));
+        }
+        if (stmt instanceof RenameTableStatement rename) {
+            // MySQL: RENAME TABLE a TO b [, c TO d]
+            List<SchemaChange> result = new ArrayList<>();
+            for (Map.Entry<Table, Table> e : rename.getTableNames()) {
+                result.add(new SchemaChange(
+                        ident(e.getKey().getName()),
+                        null,
+                        ident(e.getValue().getName()),
+                        ChangeType.RENAME_TABLE,
+                        RiskLevel.HIGH
+                ));
+            }
+            return result;
         }
         return List.of();
     }
@@ -280,6 +297,33 @@ public class MigrationParser {
                                 ChangeType.RENAME_COLUMN,
                                 RiskLevel.HIGH
                         ));
+                    }
+                }
+
+                case "RENAME_TABLE" -> {
+                    // ALTER TABLE users RENAME TO members
+                    result.add(new SchemaChange(
+                            table,
+                            null,
+                            expr.getNewTableName() != null ? ident(expr.getNewTableName()) : null,
+                            ChangeType.RENAME_TABLE,
+                            RiskLevel.HIGH
+                    ));
+                }
+
+                case "ALTER" -> {
+                    // ALTER [COLUMN] col SET NOT NULL | TYPE t | SET DATA TYPE t (PostgreSQL 등)
+                    // DROP NOT NULL, SET/DROP DEFAULT는 기존 코드를 깨지 않으므로 무시한다.
+                    if (expr.getColDataTypeList() == null || expr.getColDataTypeList().isEmpty()) {
+                        break;
+                    }
+                    String col = ident(expr.getColDataTypeList().get(0).getColumnName());
+                    String norm = " " + exprStr.replaceAll("\\s+", " ") + " ";
+
+                    if (norm.contains(" SET NOT NULL ")) {
+                        result.add(new SchemaChange(table, col, ChangeType.ADD_NOT_NULL, RiskLevel.MEDIUM));
+                    } else if (norm.contains(" SET DATA TYPE ") || norm.contains(" TYPE ")) {
+                        result.add(new SchemaChange(table, col, ChangeType.MODIFY_TYPE, RiskLevel.HIGH));
                     }
                 }
 

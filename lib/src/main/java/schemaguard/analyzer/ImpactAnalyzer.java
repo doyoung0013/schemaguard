@@ -37,7 +37,8 @@ public class ImpactAnalyzer {
             case DROP_COLUMN, RENAME_COLUMN, MODIFY_TYPE, ADD_NOT_NULL, ADD_UNIQUE ->
                     columnNodes(change.getTableName(), change.getColumnName());
 
-            case DROP_TABLE -> {
+            // 테이블명 변경은 @Table 매핑이 그대로면 테이블 삭제와 같은 범위가 깨진다.
+            case DROP_TABLE, RENAME_TABLE -> {
                 List<Node> nodes = new ArrayList<>();
                 nodes.addAll(allColumnNodesOfTable(change.getTableName()));
                 nodes.addAll(allFkFieldNodesOfTable(change.getTableName()));

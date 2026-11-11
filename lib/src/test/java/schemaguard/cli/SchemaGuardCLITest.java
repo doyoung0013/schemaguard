@@ -130,6 +130,32 @@ class SchemaGuardCLITest {
     }
 
     @Test
+    void renameTableReachesApiAsHighRisk() throws IOException {
+        Path report = tmp.resolve("report.json");
+
+        int code = run(sql("ALTER TABLE users RENAME TO members;"),
+                "--report-path", report.toString());
+
+        assertEquals(SchemaGuardCLI.EXIT_HIGH_RISK, code);
+        JsonNode json = readJson(report);
+        assertEquals("GET /me", json.at("/affectedApis/0/apiId").asText());
+        assertEquals("RENAME_TABLE", json.at("/affectedApis/0/cause/type").asText());
+    }
+
+    @Test
+    void setNotNullReachesApiAsMediumRisk() throws IOException {
+        Path report = tmp.resolve("report.json");
+
+        int code = run(sql("ALTER TABLE users ALTER COLUMN email SET NOT NULL;"),
+                "--report-path", report.toString());
+
+        assertEquals(SchemaGuardCLI.EXIT_OK, code);   // MEDIUM은 차단하지 않는다
+        JsonNode json = readJson(report);
+        assertEquals(1, json.at("/summary/medium").asInt());
+        assertEquals("ADD_NOT_NULL", json.at("/affectedApis/0/cause/type").asText());
+    }
+
+    @Test
     void consoleModeWithoutReportPathDoesNotWriteJson() throws IOException {
         Path cwdDefault = Path.of("schemaguard-report.json");
         boolean existedBefore = Files.exists(cwdDefault);

@@ -15,6 +15,38 @@
 
 ---
 
+## 4. 테이블 이름 변경, `ALTER COLUMN ... SET NOT NULL` / `TYPE` 탐지
+
+**문제**
+
+`readme.md`의 위험도 표에는 테이블명 변경이 HIGH로 적혀 있습니다. 그런데 실제로는 다음 구문들이 파싱은 되면서 **변경으로 탐지되지 않고 조용히 무시**되었습니다.
+
+| 구문 | 기대 | 수정 전 |
+|---|---|---|
+| `ALTER TABLE users RENAME TO members` | RENAME_TABLE (HIGH) | 무시 |
+| `RENAME TABLE users TO members` (MySQL) | RENAME_TABLE (HIGH) | 무시 |
+| `ALTER TABLE users ALTER COLUMN email SET NOT NULL` | ADD_NOT_NULL (MEDIUM) | 무시 |
+| `ALTER TABLE users ALTER COLUMN age TYPE BIGINT` (PostgreSQL) | MODIFY_TYPE (HIGH) | 무시 |
+
+`RENAME_TABLE`은 `ChangeType`과 콘솔 수정 가이드에 이미 있었습니다. 하지만 파서가 이 변경을 만들지 않았고 `ImpactAnalyzer`도 시작 노드를 찾지 않아서 실제로는 쓰이지 않았습니다.
+
+**변경**
+
+- `MigrationParser`
+  - `ALTER TABLE ... RENAME TO ...`와 `RENAME TABLE a TO b[, c TO d]`를 `RENAME_TABLE`로 탐지합니다. 새 테이블명은 `newName`에 담깁니다.
+  - `ALTER [COLUMN] col SET NOT NULL`은 `ADD_NOT_NULL`, `ALTER [COLUMN] col TYPE t` / `SET DATA TYPE t`는 `MODIFY_TYPE`으로 탐지합니다.
+  - `DROP NOT NULL`, `SET/DROP DEFAULT`는 기존 코드를 깨지 않으므로 계속 무시합니다.
+- `ImpactAnalyzer`: `RENAME_TABLE`은 `DROP_TABLE`과 같은 범위(테이블의 모든 컬럼과 FK 필드)에서 탐색을 시작합니다.
+
+**결과**
+
+- 샘플 프로젝트에서 `ALTER TABLE users RENAME TO members;` → `GET /me` HIGH, 종료 코드 1
+- `ALTER COLUMN email SET NOT NULL` → `GET /me` MEDIUM, 종료 코드 0 (MEDIUM은 차단하지 않음)
+
+**관련 파일**: `MigrationParser.java`, `ImpactAnalyzer.java`, `MigrationParserTest.java`, `SchemaGuardCLITest.java`
+
+---
+
 ## 3. JSON 리포트: 파싱 실패 포함, `--report-path`만 줘도 생성, 항상 생성
 
 **문제**

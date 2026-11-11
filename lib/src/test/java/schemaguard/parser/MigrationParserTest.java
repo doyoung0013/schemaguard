@@ -119,6 +119,41 @@ class MigrationParserTest {
     }
 
     @Test
+    void renameTableIsDetectedInBothSyntaxes() {
+        MigrationParser.ParseResult r = parser.parseSQL("""
+                ALTER TABLE `users` RENAME TO `members`;
+                RENAME TABLE posts TO articles, comments TO replies;
+                """);
+
+        assertFalse(r.hasFailures(), () -> "unexpected failures: " + r.failures());
+        assertEquals(3, count(r.changes(), ChangeType.RENAME_TABLE));
+        SchemaChange first = r.changes().get(0);
+        assertEquals("users", first.getTableName());
+        assertEquals("members", first.getNewName());
+        assertTrue(r.changes().stream().anyMatch(c ->
+                c.getTableName().equals("comments") && c.getNewName().equals("replies")));
+    }
+
+    @Test
+    void alterColumnSetNotNullAndTypeChangeAreDetected() {
+        MigrationParser.ParseResult r = parser.parseSQL("""
+                ALTER TABLE users ALTER COLUMN email SET NOT NULL;
+                ALTER TABLE users ALTER COLUMN age TYPE BIGINT;
+                ALTER TABLE users ALTER COLUMN bio DROP NOT NULL;
+                ALTER TABLE users ALTER COLUMN bio SET DEFAULT 'x';
+                """);
+
+        assertFalse(r.hasFailures(), () -> "unexpected failures: " + r.failures());
+        assertEquals(2, r.changes().size());   // DROP NOT NULL / SET DEFAULT는 위험 없음 → 무시
+        SchemaChange notNull = r.changes().get(0);
+        assertEquals(ChangeType.ADD_NOT_NULL, notNull.getChangeType());
+        assertEquals("email", notNull.getColumnName());
+        SchemaChange type = r.changes().get(1);
+        assertEquals(ChangeType.MODIFY_TYPE, type.getChangeType());
+        assertEquals("age", type.getColumnName());
+    }
+
+    @Test
     void emptyOrCommentOnlyFileHasNoStatementsAndNoFailures() {
         MigrationParser.ParseResult r = parser.parseSQL("-- nothing here\n\n");
 
