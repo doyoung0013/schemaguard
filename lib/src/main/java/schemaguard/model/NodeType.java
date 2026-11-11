@@ -7,5 +7,6 @@ public enum NodeType {
     REPOSITORY,   // Repository 메서드
     FIELD,        // 일반 Entity 필드
     FK_FIELD,     // FK 역할 Entity 필드   ex. @ManyToOne Post.author, @JoinColumn author_id
-    COLUMN        // DB 컬럼
+    COLUMN,       // DB 컬럼
+    ENTITY_LOAD   // 엔티티를 연관으로 로딩 (그 엔티티의 모든 컬럼을 SELECT)  ex. load:User
 }

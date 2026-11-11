@@ -31,6 +31,11 @@ public class RepositoryInfo {
         methods.add(new MethodEntry(methodName, lineNumber));
     }
 
+    /** @param fetchPaths 이 메서드가 함께 로딩하는 연관 경로 (@EntityGraph attributePaths, JPQL join fetch). 예) "post.author" */
+    public void addMethod(String methodName, int lineNumber, List<String> fetchPaths) {
+        methods.add(new MethodEntry(methodName, lineNumber, fetchPaths));
+    }
+
     public void addJpqlQuery(String jpql, int lineNumber)   { jpqlQueries.add(jpql); }
     public void addNativeQuery(String sql, int lineNumber)  { nativeQueries.add(sql); }
 
@@ -55,5 +60,8 @@ public class RepositoryInfo {
                 .findFirst().orElse(-1);
     }
 
-    public record MethodEntry(String name, int lineNumber) {}
+    public record MethodEntry(String name, int lineNumber, List<String> fetchPaths) {
+        public MethodEntry(String name, int lineNumber) { this(name, lineNumber, List.of()); }
+        public MethodEntry { fetchPaths = List.copyOf(fetchPaths); }
+    }
 }

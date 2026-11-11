@@ -107,7 +107,7 @@ class GraphPropagationTest {
             @Entity @Table(name = "post_tags")
             public class PostTag {
                 @Id private Long id;
-                @ManyToOne @JoinColumn(name = "tag_id") private Tag tag;
+                @ManyToOne(fetch = FetchType.LAZY) @JoinColumn(name = "tag_id") private Tag tag;
             }
             """;
     private static final String POST_TAG_REPO = """

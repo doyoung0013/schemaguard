@@ -47,7 +47,7 @@ public class ImpactAnalyzer {
     private List<Node> resolveStartNodes(SchemaChange change) {
         return switch (change.getChangeType()) {
 
-            case DROP_COLUMN, RENAME_COLUMN, MODIFY_TYPE, ADD_NOT_NULL, ADD_UNIQUE ->
+            case DROP_COLUMN, RENAME_COLUMN, DROP_FK_COLUMN, MODIFY_TYPE, ADD_NOT_NULL, ADD_UNIQUE ->
                     columnNodes(change.getTableName(), change.getColumnName());
 
             // 테이블명 변경은 @Table 매핑이 그대로면 테이블 삭제와 같은 범위가 깨진다.
@@ -59,9 +59,6 @@ public class ImpactAnalyzer {
                 nodes.addAll(fkFieldsReferencingTable.getOrDefault(change.getTableName(), List.of()));
                 yield nodes;
             }
-
-            case DROP_FK_COLUMN ->
-                    columnNodes(change.getTableName(), change.getColumnName());
 
             case DROP_FOREIGN_KEY ->
                     allFkFieldNodesOfTable(change.getTableName());
@@ -109,6 +106,10 @@ public class ImpactAnalyzer {
             // 엣지 삽입 순서가 아니라 노드 id 순으로 방문해야 같은 거리의 경로 중 항상 같은 것이 남는다.
             List<Node> neighbors = new ArrayList<>();
             for (Edge edge : graph.incomingEdgesOf(current)) neighbors.add(graph.getEdgeSource(edge));
+            if (!followsAssociationLoads(change)) {
+                neighbors.removeIf(n -> n.getType() == NodeType.ENTITY_LOAD
+                        || graph.getEdge(n, current).getRelationType() == RelationType.LOADS);
+            }
             neighbors.sort(BY_ID);
             for (Node neighbor : neighbors) {
                 if (!visited.contains(neighbor)) {
@@ -167,6 +168,19 @@ public class ImpactAnalyzer {
         return result;
     }
 
+
+    /**
+     * 연관 로딩 경로(LOADS)는 "읽기가 깨지는" 변경에서만 따라간다.
+     * 컬럼/테이블이 사라지거나 이름이 바뀌면 연관 엔티티를 SELECT 하는 순간 실패한다.
+     * 타입 변경, NOT NULL, UNIQUE 는 기존 값을 읽는 데는 영향이 없거나 데이터에 따라 달라서 제외한다
+     * (실제 MySQL 측정에서 이 변경들의 오탐이 가장 많았다).
+     */
+    private static boolean followsAssociationLoads(SchemaChange change) {
+        return switch (change.getChangeType()) {
+            case DROP_COLUMN, RENAME_COLUMN, DROP_FK_COLUMN, DROP_TABLE, RENAME_TABLE -> true;
+            default -> false;
+        };
+    }
 
     private static final Comparator<Node> BY_ID = Comparator.comparing(Node::getId);
 

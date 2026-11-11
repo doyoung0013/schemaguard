@@ -1,6 +1,6 @@
 {
   "summary" : {
-    "high" : 7,
+    "high" : 8,
     "medium" : 3,
     "low" : 0,
     "hasHighRisk" : true,
@@ -208,6 +208,55 @@
       "id" : "api:GET /me",
       "type" : "API",
       "name" : "GET /me",
+      "filePath" : null,
+      "line" : null
+    } ]
+  }, {
+    "apiId" : "GET /posts",
+    "riskLevel" : "HIGH",
+    "cause" : {
+      "type" : "DROP_COLUMN",
+      "table" : "users",
+      "column" : "email",
+      "fkName" : null,
+      "referencedTable" : null,
+      "referencedColumn" : null
+    },
+    "isFkChange" : false,
+    "impactPath" : [ {
+      "id" : "col:users.email",
+      "type" : "COLUMN",
+      "name" : "users.email",
+      "filePath" : null,
+      "line" : null
+    }, {
+      "id" : "load:User",
+      "type" : "ENTITY_LOAD",
+      "name" : "User (association load)",
+      "filePath" : null,
+      "line" : null
+    }, {
+      "id" : "repo:PostRepository.findByAuthor",
+      "type" : "REPOSITORY",
+      "name" : "PostRepository.findByAuthor",
+      "filePath" : "com/example/post/PostRepository.java",
+      "line" : 3
+    }, {
+      "id" : "svc:PostService.list",
+      "type" : "SERVICE",
+      "name" : "PostService.list",
+      "filePath" : "com/example/post/PostService.java",
+      "line" : 5
+    }, {
+      "id" : "ctrl:PostController.list",
+      "type" : "CONTROLLER",
+      "name" : "PostController.list",
+      "filePath" : "com/example/post/PostController.java",
+      "line" : 5
+    }, {
+      "id" : "api:GET /posts",
+      "type" : "API",
+      "name" : "GET /posts",
       "filePath" : null,
       "line" : null
     } ]

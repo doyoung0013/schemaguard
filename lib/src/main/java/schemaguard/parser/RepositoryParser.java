@@ -43,14 +43,22 @@ public class RepositoryParser {
 
             for (MethodDeclaration method : clazz.getMethods()) {
                 int methodLine = method.getRange().map(r -> r.begin.line).orElse(-1);
-                info.addMethod(method.getNameAsString(), methodLine);
+
+                // 이 메서드가 함께 로딩하는 연관 경로
+                Set<String> fetchPaths = new LinkedHashSet<>();
+                method.getAnnotationByName("EntityGraph").ifPresent(ann ->
+                        fetchPaths.addAll(annotationStrings(ann, "attributePaths")));
 
                 method.getAnnotationByName("Query").ifPresent(ann -> {
                     extractQueryString(ann).ifPresent(query -> {
                         if (isNativeQuery(ann)) info.addNativeQuery(query, methodLine);
-                        else                   info.addJpqlQuery(query, methodLine);
+                        else {
+                            info.addJpqlQuery(query, methodLine);
+                            fetchPaths.addAll(joinFetchPaths(query));
+                        }
                     });
                 });
+                info.addMethod(method.getNameAsString(), methodLine, new ArrayList<>(fetchPaths));
             }
             result.add(info);
         });
@@ -82,6 +90,47 @@ public class RepositoryParser {
                     .findFirst()
                     .map(p -> stripQuotes(p.getValue().toString()));
         return Optional.empty();
+    }
+
+    /** @Ann(attr = {"a", "b"}) 또는 @Ann(attr = "a") 의 문자열 값들. */
+    private List<String> annotationStrings(AnnotationExpr ann, String attr) {
+        List<String> out = new ArrayList<>();
+        if (ann instanceof NormalAnnotationExpr n) {
+            for (MemberValuePair p : n.getPairs()) {
+                if (!p.getNameAsString().equals(attr)) continue;
+                p.getValue().findAll(com.github.javaparser.ast.expr.StringLiteralExpr.class)
+                        .forEach(s -> out.add(s.getValue().trim()));
+                if (out.isEmpty() && p.getValue().isStringLiteralExpr())
+                    out.add(p.getValue().asStringLiteralExpr().getValue().trim());
+            }
+        }
+        return out;
+    }
+
+    private static final java.util.regex.Pattern FROM_ALIAS = java.util.regex.Pattern.compile(
+            "(?i)\\bfrom\\s+\\w+(?:\\s+as)?\\s+(\\w+)");
+    private static final java.util.regex.Pattern JOIN_FETCH = java.util.regex.Pattern.compile(
+            "(?i)\\bjoin\\s+fetch\\s+(\\w+)\\.(\\w+)(?:\\s+(?:as\\s+)?(?!join\\b|left\\b|inner\\b|where\\b|order\\b|group\\b)(\\w+))?");
+
+    /**
+     * JPQL 의 join fetch 를 루트 엔티티 기준 경로로 바꾼다.
+     *   select r from Report r join fetch r.post p join fetch p.author  →  ["post", "post.author"]
+     */
+    static List<String> joinFetchPaths(String jpql) {
+        List<String> out = new ArrayList<>();
+        java.util.regex.Matcher from = FROM_ALIAS.matcher(jpql);
+        if (!from.find()) return out;
+        Map<String, String> pathOfAlias = new HashMap<>();
+        pathOfAlias.put(from.group(1), "");
+        java.util.regex.Matcher m = JOIN_FETCH.matcher(jpql);
+        while (m.find()) {
+            String base = pathOfAlias.get(m.group(1));
+            if (base == null) continue;
+            String path = base.isEmpty() ? m.group(2) : base + "." + m.group(2);
+            out.add(path);
+            if (m.group(3) != null) pathOfAlias.put(m.group(3), path);
+        }
+        return out;
     }
 
     private boolean isNativeQuery(AnnotationExpr ann) {

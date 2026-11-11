@@ -9,7 +9,7 @@ import java.nio.file.Path;
  *
  * 파일 4개(Entity, Repository, Service, Controller)가 한 그룹이고, 그룹 k는
  *   - 테이블 t{k}(id, email, name, parent_id → t{k-1}) 엔티티
- *   - findByEmail / findByName 리포지토리
+ *   - findByEmail / findByName 리포지토리 (findByEmail 은 @EntityGraph 로 LAZY parent 를 함께 로딩)
  *   - 자기 리포지토리와 다음 그룹 리포지토리를 호출하는 서비스
  *   - GET 엔드포인트 2개를 가진 컨트롤러
  * 로 구성된다. 실제 코드와 비슷한 파싱 부하를 주기 위해 파일마다 보조 메서드를 넣는다.
@@ -55,7 +55,7 @@ public final class SampleProjectGenerator {
     private static String entity(String pkg, int k) {
         String parent = k > 0
                 ? """
-                      @ManyToOne
+                      @ManyToOne(fetch = FetchType.LAZY)
                       @JoinColumn(name = "parent_id")
                       private %s parent;
                   """.formatted("E" + (k - 1))
@@ -97,10 +97,12 @@ public final class SampleProjectGenerator {
                 import org.springframework.data.jpa.repository.JpaRepository;
 
                 public interface E%dRepository extends JpaRepository<E%d, Long> {
+                    %s
                     Optional<E%d> findByEmail(String email);
                     List<E%d> findByName(String name);
                 }
-                """.formatted(pkg, k, k, k, k);
+                """.formatted(pkg, k, k,
+                        k > 0 ? "@EntityGraph(attributePaths = {\"parent\"})" : "", k, k);
     }
 
     private static String service(String pkg, int k, int next, String nextPkg) {

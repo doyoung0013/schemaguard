@@ -15,6 +15,123 @@
 
 ---
 
+## 11. 연관 엔티티 로딩 전파: 실제 MySQL 측정에서 놓친 10건 해결
+
+9번 측정에서 놓친 10건(FN)은 원인이 모두 같았습니다. JPA는 **연관 엔티티를 로딩할 때 그 엔티티에 매핑된 컬럼을 전부 SELECT**합니다. 그런데 SchemaGuard는 "컬럼 → 그 컬럼을 가진 엔티티의 Repository"로만 따라갔습니다. 그래서 `users.email`을 지우면 User를 직접 조회하지 않아도 `Post.author`를 함께 로딩하는 게시글 목록이 실패하는데, 이 경로를 몰랐습니다.
+
+### 처음 시도한 방법과 버린 이유
+
+먼저 단순한 규칙을 시험했습니다. "컬럼을 삭제하거나 이름을 바꾸면, 그 테이블을 FK로 참조하는 모든 엔티티로 전파"하는 방식입니다(7번의 `fkFieldsReferencingTable` 재사용). 9번의 실제 측정 결과(actual.json)와 비교한 결과는 다음과 같습니다.
+
+| | FN | FP | 정밀도 | 재현율 |
+|---|---:|---:|---:|---:|
+| 개선 전 | 10 | 51 | 62.5% | 89.5% |
+| 단순 전파 | 0 | **68 (+17)** | 58.3% | 100% |
+
+FN은 사라졌지만 오탐이 17건 늘었습니다. 늘어난 오탐은 모두 연관을 **실제로는 로딩하지 않는** 경로였습니다.
+- `countByPostAndStatus`: count 쿼리라 엔티티를 아예 로딩하지 않습니다.
+- `report.getPost().getAuthor()`를 그대로 넘기는 경우: User 프록시는 초기화되지 않습니다.
+- `post.getAuthor().getId()`: 프록시가 id를 이미 들고 있어서 쿼리가 나가지 않습니다.
+
+community의 연관은 전부 `fetch = LAZY`라서, "참조한다"와 "로딩한다"를 구분해야 했습니다.
+
+### 최종 방법: 연관이 실제로 로딩되는 곳만 연결
+
+새 노드 `load:<Entity>`(`NodeType.ENTITY_LOAD`)는 "이 엔티티가 연관으로 로딩된다"는 뜻입니다. 새 관계 `LOADS`로 연결합니다.
+
+```
+load:User ──LOADS──▶ col:users.*                           로딩하면 모든 컬럼(FK 컬럼 포함)을 읽는다
+repo:PostRepository.findAllByOrderByIdDesc ──LOADS──▶ load:User    ① @EntityGraph(attributePaths = "author")
+repo:ReportRepository.findFull ──LOADS──▶ load:Post, load:User     ② JPQL "join fetch r.post p join fetch p.author"
+repo:PostRepository.* ──LOADS──▶ load:User                         ③ Post.author 가 EAGER (fetch 미지정 @ManyToOne 포함)
+load:Post ──LOADS──▶ load:User                                      ③ Post 를 연관으로 로딩해도 EAGER author 가 따라온다
+svc:ReportService.process ──LOADS──▶ load:Post                     ④ report.getPost().getTitle() (지연 로딩 초기화)
+```
+
+**추출(파서)**
+- `EntityParser`: 연관 어노테이션의 `fetch`를 읽습니다. 지정되지 않으면 JPA 기본값을 씁니다(`@ManyToOne`/`@OneToOne`은 EAGER, `@OneToMany`/`@ManyToMany`는 LAZY). 결과는 `FkMapping.isEagerFetch()`에 담깁니다.
+- `RepositoryParser`: 메서드별로 `@EntityGraph(attributePaths = ...)`와 JPQL의 `join fetch`를 읽어 루트 엔티티 기준 경로로 바꿉니다(예: `post.author`). 결과는 `RepositoryInfo.MethodEntry.fetchPaths`에 담깁니다.
+- `ServiceParser`: getter 체인 `x.getFoo().getBar()`에서 바깥 호출이 `getId()`가 아니면 연관 `foo`를 초기화하는 접근으로 기록합니다. 결과는 `ServiceInfo.AssociationAccess`에 담깁니다.
+
+**그래프** (`DependencyGraphBuilder.addAssociationLoadEdges`)
+- 위 ①~④를 `LOADS` 엣지로 만듭니다.
+- `@EntityGraph` 경로는 단계별로 따라가며 로딩되는 엔티티마다 연결합니다. `post.author`라면 Post와 User 둘 다입니다.
+- 서비스 getter 접근은 같은 이름의 FK 필드가 모두 같은 엔티티를 가리킬 때만 연결합니다(이름 기반 추정).
+
+**분석** (`ImpactAnalyzer`)
+- `LOADS` 엣지는 **읽기가 깨지는 변경**(`DROP_COLUMN`, `RENAME_COLUMN`, `DROP_FK_COLUMN`, `DROP_TABLE`, `RENAME_TABLE`)에서만 따라갑니다.
+- 타입 변경, `NOT NULL`, `UNIQUE`는 기존 값을 읽는 데 영향이 없거나 데이터에 따라 달라서 제외합니다. 9번 측정에서 오탐이 가장 많았던 종류입니다.
+
+**영향 경로 예시** (community, 실제 리포트)
+
+```
+V11 GET /                : col:users.email → load:User → svc:PostService.getPosts → ctrl:PostController.postList → api:GET /
+V3  GET /api/bookmarks   : col:posts.title → load:Post → repo:BookmarkRepository.findByUserIdOrderByIdDesc → svc:BookmarkService.getMyBookmarks → … → api:GET /api/bookmarks
+V3  POST …/accept        : col:posts.title → load:Post → svc:ReportService.process → ctrl:AdminReportController.accept → api:POST /api/admin/reports/{reportId}/accept
+```
+
+### 결과: 9번의 실제 MySQL 측정과 다시 비교
+
+비교 방법은 9번과 같습니다. 측정 데이터(actual.json)는 그대로 쓰고, SchemaGuard 예측만 새 빌드로 다시 만들었습니다.
+
+| 기준 | 개선 전 (9번) | 개선 후 |
+|---|---:|---:|
+| 재현율 (전체) | 89.5% (85/95) | **100% (95/95)** |
+| 정밀도 (전체) | 62.5% (85/136) | 64.2% (95/148) |
+| 구조 변경 시나리오 9개: 재현율 | 89.0% (81/91) | **100% (91/91)** |
+| 구조 변경 시나리오 9개: 정밀도 | 98.8% (81/82) | 96.8% (91/94) |
+| 마이그레이션 단위 차단: 재현율 / 정밀도 | 100% / 71.4% | 100% / 71.4% (변화 없음) |
+
+시나리오별로 FN이 있던 V0(2건), V2(2건), V3(3건), V11(3건)이 모두 0이 됐습니다.
+
+**새로 생긴 오탐 2건:** V2와 V3의 `POST /api/admin/reports/{reportId}/reject`입니다.
+- 승인과 거절이 같은 서비스 메서드 `ReportService.process(id, accepted)`를 쓰고, `if (accepted)` 분기 안에서만 `report.getPost().getTitle()`을 호출합니다.
+- SchemaGuard는 메서드 단위로 판단해서 분기를 구분하지 못합니다. 9번의 V13 오탐 1건과 같은 종류의 한계입니다.
+
+남은 오탐 53건 중 50건은 9번에서 분석한 위험도 판정 문제입니다(FK 제약 변경 30건, 데이터 의존 타입/NOT NULL 변경 20건). 이번 변경과는 관계없습니다.
+
+### 함께 고친 버그: `EntityParser`의 `mappedBy` 처리
+
+`@OneToMany(mappedBy = ...)` 필드를 만나면 `continue`가 아니라 `return`을 해서, **그 엔티티의 뒤쪽 필드가 전부 누락**됐습니다. 예를 들어 `posts` 컬렉션 아래에 선언된 `email` 컬럼은 그래프에 없었습니다. community에는 `@OneToMany`가 없어서 측정에는 영향이 없었지만, 일반적인 양방향 매핑 코드에서는 탐지가 크게 빠졌을 버그입니다.
+
+### 테스트
+
+- 신규 `AssociationLoadTest` 11개
+  - 전파되는 경우: `@EntityGraph`, 다단계 `join fetch`, 서비스 getter 접근, EAGER, EAGER 연쇄(`load:Post → load:User`)
+  - 전파되지 않는 경우: count 쿼리, 다른 연관만 초기화, `getId()` 프록시 접근, 타입 변경과 `NOT NULL`
+  - 경로 표시와 파서 3종, `mappedBy` 버그 회귀 테스트
+- `GraphPropagationTest`: "전파 색인이 없으면 놓친다"를 확인하는 테스트의 픽스처가 EAGER(fetch 미지정)였습니다. 그래서 새 로딩 경로가 그 API를 정상적으로 찾아 버려서, 테스트 의도(FK 참조 색인 검증)를 유지하도록 픽스처를 `LAZY`로 바꿨습니다.
+- 결정성 스냅샷은 항목 하나가 늘었습니다. `GET /posts`의 `DROP_COLUMN users.email`(경로: `col:users.email → load:User → repo:PostRepository.findByAuthor → …`)입니다. 픽스처의 `Post.author`가 fetch를 지정하지 않은 `@ManyToOne`(= EAGER)이라 실제로도 게시글을 읽을 때 User를 함께 SELECT하므로 맞는 변화입니다. 확인한 뒤 정답 파일을 다시 만들었습니다.
+- 전체 41개 통과
+
+### 성능
+
+**벤치마크 생성기 변경:** 10번 벤치마크의 샘플 엔티티는 `@ManyToOne parent`가 fetch를 지정하지 않아(EAGER) t(k) → t(k-1) → … → t0로 길이 1,250의 EAGER 사슬을 이뤘습니다.
+- 이 상태로 새 코드를 돌리면, 파일 5,000개와 변경 12개에서 결과가 22,427건이 나오고 분석이 4.9초 걸렸습니다.
+- 의미상 맞는 결과입니다. Hibernate도 이 사슬 전체를 로딩합니다. 하지만 실제 프로젝트를 닮지 않았습니다.
+- 그래서 생성기를 실제 Spring 코드 관례에 맞췄습니다. `parent`는 `fetch = LAZY`로 바꾸고, `findByEmail`에는 `@EntityGraph("parent")`를 붙였습니다. 이로써 1단계 연관 로딩을 벤치마크에서도 측정합니다.
+
+| 파일 수 | 노드 | 엣지 | graph | analyze (변경 12) | analyze (변경 100) | analyze (변경 1,000) |
+|---:|---:|---:|---:|---:|---:|---:|
+| 100 | 572 | 1,185 | 4.7 ms | 1.9 ms | 7.8 ms | 36.0 ms |
+| 1,000 | 5,747 | 11,985 | 46.1 ms | 4.9 ms | 10.3 ms | 58.8 ms |
+| 5,000 | 28,747 | 59,985 | 199.0 ms | 5.4 ms | 14.1 ms | 65.7 ms |
+| 10,000 | 57,497 | 119,985 | 501.3 ms | 3.3 ms | 14.1 ms | 88.2 ms |
+| 20,000 | 114,997 | 239,985 | 704.5 ms | 3.6 ms | 11.4 ms | 113.9 ms |
+
+- 10번 표와 비교하면, 20,000개 기준으로 노드는 4.5%, 엣지는 11.6% 늘었습니다(`load:` 노드와 `LOADS` 엣지). 그래프 생성은 0.63초에서 0.70초로 늘었습니다.
+- 분석 시간은 여전히 규모와 거의 무관합니다(변경 1,000개에서 최대 114ms).
+- 영향 API 수는 연관 로딩 경로가 더해져 늘었습니다(변경 1,000개 기준 4,000건 → 4,250건).
+
+### 한계
+
+- 분기를 구분하지 못합니다(메서드 단위 판단). 위 `reject` 사례가 그렇습니다.
+- DTO나 템플릿에서의 지연 로딩을 보지 못합니다. getter 접근은 `@Service` 클래스 안에서만 봅니다. `ReportResponse.from(report)` 같은 DTO 정적 메서드나 Thymeleaf `${post.author.nickname}`처럼 다른 곳에서 초기화하면 놓칩니다. 이번 community 측정에서는 해당 API들이 `@EntityGraph`로도 잡혀서 드러나지 않았습니다.
+- 서비스 getter 접근은 이름으로 추정합니다. `getPost()`처럼 같은 이름의 FK 필드가 서로 다른 엔티티를 가리키면 연결하지 않습니다.
+- 깊은 EAGER 사슬은 결과 수와 분석 시간이 사슬 길이에 비례해 늘어납니다. 실제로 그만큼의 API가 영향을 받는다는 뜻이라 결과 자체는 맞습니다.
+
+---
+
 ## 10. 규모별 성능 측정과 그래프·분석 단계 병목 개선
 
 6번에서는 파싱 단계만 다뤘습니다. 이번에는 **파싱 이후 단계(그래프 생성, 영향 분석)** 가 규모와 변경 수에 따라 어떻게 늘어나는지 측정했습니다. 그 과정에서 찾은 병목 두 곳을 고쳤습니다.

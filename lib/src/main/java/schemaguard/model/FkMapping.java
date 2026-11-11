@@ -8,6 +8,7 @@ public class FkMapping {
     private final String joinColumnName;
     private final String referencedEntity;
     private final String fkRelationType;
+    private final boolean eagerFetch;   // 연관 엔티티를 소유 엔티티와 함께 항상 로딩하는지 (FetchType.EAGER)
     private final String filePath;    // 소스 파일 경로
     private final int    lineNumber;  // 필드 선언 라인
 
@@ -20,6 +21,14 @@ public class FkMapping {
     public FkMapping(String entityClass, String fieldName, String tableName,
                      String joinColumnName, String referencedEntity, String fkRelationType,
                      String filePath, int lineNumber) {
+        this(entityClass, fieldName, tableName, joinColumnName, referencedEntity, fkRelationType,
+             filePath, lineNumber, defaultEager(fkRelationType));
+    }
+
+    public FkMapping(String entityClass, String fieldName, String tableName,
+                     String joinColumnName, String referencedEntity, String fkRelationType,
+                     String filePath, int lineNumber, boolean eagerFetch) {
+        this.eagerFetch       = eagerFetch;
         this.entityClass      = entityClass;
         this.fieldName        = fieldName;
         this.tableName        = tableName;
@@ -36,6 +45,12 @@ public class FkMapping {
     public String getJoinColumnName()   { return joinColumnName; }
     public String getReferencedEntity() { return referencedEntity; }
     public String getFkRelationType()   { return fkRelationType; }
+    public boolean isEagerFetch()       { return eagerFetch; }
+
+    /** JPA 기본값: @ManyToOne/@OneToOne 은 EAGER, @OneToMany/@ManyToMany 는 LAZY. */
+    public static boolean defaultEager(String relationType) {
+        return "ManyToOne".equals(relationType) || "OneToOne".equals(relationType);
+    }
     public String getFilePath()         { return filePath; }
     public int    getLineNumber()       { return lineNumber; }
 

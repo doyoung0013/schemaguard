@@ -69,13 +69,16 @@ public class EntityParser {
                     String joinColumnName  = getAnnotationValue(field, "JoinColumn", "name")
                             .orElse(toSnakeCase(fieldName) + "_id");
 
+                    // mappedBy 쪽 @OneToMany 는 이 테이블에 FK 컬럼이 없다 → 이 필드만 건너뛴다.
+                    // (예전에는 return 이라 이 엔티티의 뒤쪽 필드가 전부 누락됐다)
                     if (fkRelationType.equals("OneToMany")
-                            && !hasAnnotation(field, "JoinColumn")) return;
+                            && !hasAnnotation(field, "JoinColumn")) continue;
 
                     fkMappings.add(new FkMapping(
                             className, fieldName, tableName,
                             joinColumnName, referencedEntity, fkRelationType,
-                            filePath, line));               // ← 위치 정보
+                            filePath, line,                 // ← 위치 정보
+                            isEager(field, fkRelationType)));
                 } else {
                     // 일반 필드
                     String columnName = getAnnotationValue(field, "Column", "name")
@@ -106,6 +109,13 @@ public class EntityParser {
                 .map(AnnotationExpr::getNameAsString)
                 .filter(FK_ANNOTATIONS::contains)
                 .findFirst().orElse("Unknown");
+    }
+
+    /** fetch = FetchType.LAZY/EAGER 를 읽고, 없으면 JPA 기본값을 쓴다. */
+    private boolean isEager(FieldDeclaration field, String relationType) {
+        return getAnnotationValue(field, relationType, "fetch")
+                .map(v -> v.contains("EAGER"))
+                .orElse(FkMapping.defaultEager(relationType));
     }
 
     private Optional<String> getAnnotationValue(NodeWithAnnotations<?> node,

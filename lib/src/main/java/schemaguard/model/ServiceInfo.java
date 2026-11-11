@@ -10,6 +10,7 @@ public class ServiceInfo {
     private final int    classLine;
 
     private final List<MethodCall> methodCalls = new ArrayList<>();
+    private final List<AssociationAccess> associationAccesses = new ArrayList<>();
 
     public ServiceInfo(String className) {
         this(className, null, -1);
@@ -38,6 +39,17 @@ public class ServiceInfo {
     public String            getFilePath()   { return filePath; }
     public int               getClassLine()  { return classLine; }
     public List<MethodCall>  getMethodCalls(){ return methodCalls; }
+    public List<AssociationAccess> getAssociationAccesses() { return associationAccesses; }
+
+    /**
+     * 연관 엔티티를 실제로 초기화하는 접근을 기록한다. 예) report.getPost().getTitle() → attribute "post"
+     * (getId()만 꺼내는 경우는 프록시가 id를 갖고 있어 로딩되지 않으므로 기록하지 않는다.)
+     */
+    public void addAssociationAccess(String callerMethod, int callerLine, String attribute, int line) {
+        associationAccesses.add(new AssociationAccess(callerMethod, callerLine, attribute, line));
+    }
+
+    public record AssociationAccess(String callerMethod, int callerLine, String attribute, int line) {}
 
     // ── 내부 레코드 ───────────────────────────────────────────────────────────
 

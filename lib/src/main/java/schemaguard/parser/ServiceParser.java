@@ -40,6 +40,21 @@ public class ServiceParser {
                 int methodLine = method.getRange().map(r -> r.begin.line).orElse(-1);
                 String callerMethod = method.getNameAsString();
 
+                // 연관 초기화: x.getPost().getTitle() 처럼 getter 결과에 다시 getId() 가 아닌 호출을 하면
+                // 지연 로딩 프록시가 초기화되어 연관 엔티티의 컬럼을 전부 SELECT 한다.
+                method.findAll(MethodCallExpr.class).forEach(call -> {
+                    String name = call.getNameAsString();
+                    if (!isGetter(call) || call.getScope().isEmpty()) return;
+                    call.getParentNode()
+                            .filter(p -> p instanceof MethodCallExpr)
+                            .map(p -> (MethodCallExpr) p)
+                            .filter(outer -> outer.getScope().map(s -> s == call).orElse(false))
+                            .filter(outer -> !outer.getNameAsString().equals("getId"))
+                            .ifPresent(outer -> info.addAssociationAccess(callerMethod, methodLine,
+                                    decapitalize(name.substring(3)),
+                                    call.getRange().map(r -> r.begin.line).orElse(methodLine)));
+                });
+
                 method.findAll(MethodCallExpr.class).forEach(call ->
                         call.getScope().ifPresent(scope -> {
                             String calleeType = fieldTypeMap.get(scope.toString());
@@ -54,6 +69,16 @@ public class ServiceParser {
             result.add(info);
         });
         return result;
+    }
+
+    private static boolean isGetter(MethodCallExpr call) {
+        String n = call.getNameAsString();
+        return n.length() > 3 && n.startsWith("get") && Character.isUpperCase(n.charAt(3))
+                && call.getArguments().isEmpty();
+    }
+
+    private static String decapitalize(String s) {
+        return s.isEmpty() ? s : Character.toLowerCase(s.charAt(0)) + s.substring(1);
     }
 
     private boolean isService(ClassOrInterfaceDeclaration clazz) {
