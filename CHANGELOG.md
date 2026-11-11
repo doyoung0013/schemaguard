@@ -97,6 +97,157 @@
 
 ---
 
+## 9. 실제 MySQL로 검증한 탐지 정확도
+
+SchemaGuard의 핵심 주장은 "배포 전에 런타임 오류가 날 API를 찾는다"입니다. 이 주장을 사람이 결과를 읽어 보는 방식이 아니라 **실제 DB에서 API를 호출해 생기는 실패**와 비교해 검증했습니다. 이 항목은 측정만 했고, SchemaGuard 코드는 바꾸지 않았습니다.
+
+### 요약
+
+- 실제로 DB 오류가 난 API 95건 중 **85건을 사전에 탐지**했습니다(재현율 89.5%). 정밀도는 62.5%(예측 136건 중 85건 적중)입니다.
+- 마이그레이션 단위로 보면 실제로 API를 깨뜨린 마이그레이션 10개를 **모두 차단**했습니다(누락 0). 깨뜨리지 않은 6개 중 4개는 불필요하게 차단했습니다.
+- 컬럼이나 테이블을 삭제하거나 이름을 바꾸는 **구조 변경**만 보면 정밀도 98.8%, 재현율 89.0%입니다. 오탐 51건 중 49건은 **제약이나 타입만 바꾸는** 마이그레이션 6개에서 나왔습니다.
+- 놓친 10건은 모두 원인이 하나입니다. **연관 엔티티 로딩**(`@EntityGraph`와 지연 로딩)으로 다른 테이블의 컬럼을 읽는 경로를 모델링하지 않았습니다.
+
+### 측정 방법
+
+**측정 대상**
+- 앱: `community` 저장소 `test/schemaguard-complex` 브랜치(커밋 `1151962`)
+- 마이그레이션: `src/main/resources/db/migration`의 18개 파일 전부
+- 시나리오: V1, V12는 `CREATE TABLE` 파일이라 다음 항목의 기본 스키마로 쓰고 시나리오에서 뺐습니다. 실제 시나리오는 16개입니다.
+
+**환경**
+
+| 항목 | 값 |
+|---|---|
+| DB | `mysql:8.0.36` (Testcontainers 2.0.4, Spring Boot 4.0.5 BOM 관리 버전, Docker Engine 29.6.2) |
+| 컨테이너 옵션 | `--innodb-flush-log-at-trx-commit=0 --skip-log-bin` (복원 속도용, 쿼리 의미에는 영향 없음) |
+| JPA | `spring.jpa.hibernate.ddl-auto=none`. `validate`면 스키마가 달라졌을 때 앱이 아예 뜨지 않고, `update`면 Hibernate가 사라진 컬럼을 다시 만들어 오류를 덮습니다. Flyway, Liquibase, `spring.sql.init`은 끕니다. |
+| 테스트 | `community`의 `src/test/java/com/schemaguard/community/accuracy/SchemaGuardAccuracyTest.java`. 실행 명령은 `./gradlew test --tests '*SchemaGuardAccuracyTest*'`이고 약 13분 걸립니다. |
+
+**기본 스키마** (`src/test/resources/accuracy/base-schema.sql`)
+- V1 + V12로 만들었습니다. V1의 `posts` 정의 뒤에 빠진 `;`를 보충했습니다. 이 누락 때문에 SchemaGuard가 V1에 종료 코드 3을 냅니다. 마이그레이션 원본은 SchemaGuard의 입력이라 고치지 않았습니다.
+- 엔티티와 맞지 않는 부분을 보정했습니다. `users.password`와 `users.role`을 추가했고, `comments.content`를 `VARCHAR(1000)`으로 바꿨습니다.
+- 마이그레이션이 이름으로 참조하는 FK 제약 이름(`fk_comments_post` 등)은 V1, V12의 것을 그대로 유지했습니다.
+- 검증: 이 스키마에서 `ddl-auto=validate`로 컨텍스트가 정상적으로 뜨는 것을 확인했습니다(`CommunityApplicationTests.contextLoads` 통과).
+
+**시드 데이터** (`seed.sql`)
+- 모든 테이블에 FK가 맞는 행을 2~3개씩 넣었습니다(사용자, 카테고리, 게시글, 댓글, 좋아요, 태그, 북마크, 신고, 알림). 데이터가 없어서 쿼리가 실행되지 않는 API가 없도록 하기 위해서입니다.
+- 사용자 3명의 비밀번호는 `password1234`의 bcrypt 해시입니다.
+
+**시나리오마다 하는 일**
+1. 모든 테이블을 삭제하고 기본 스키마와 시드를 적용합니다.
+2. 대상 마이그레이션을 구문 단위로 실행합니다. 실패한 구문은 기록하고 다음 구문으로 계속 갑니다.
+3. Hikari 커넥션 풀을 비워서 이전 스키마 메타데이터가 남지 않게 합니다.
+4. 엔드포인트를 전부 호출합니다.
+   - 호출하기 전마다 모든 테이블을 "마이그레이션 직후 스냅샷"으로 되돌립니다(TRUNCATE + INSERT). 삭제나 생성 같은 호출이 뒤 호출의 결과에 영향을 주지 않게 하기 위해서입니다.
+
+**엔드포인트**
+- 목록은 `RequestMappingHandlerMapping`에서 앱 패키지의 핸들러 메서드를 자동으로 수집합니다. 손으로 만든 호출 표와 다르면 테스트가 실패합니다. 총 28개입니다.
+- API id 형식은 SchemaGuard와 같은 `"<HTTP 메서드> <경로 패턴>"`입니다(예: `POST /posts/{id}/delete`).
+- 호출은 MockMvc로 합니다.
+  - 시드 사용자로 인증하고(`with(user(...))`, 앱의 `UserDetails` 구현 사용), 모든 요청에 `csrf()`를 붙입니다.
+  - 경로 변수에는 시드 id를 넣고, 폼과 JSON 본문은 검증을 통과하는 값으로 채웁니다.
+  - 좋아요나 북마크처럼 분기가 있는 엔드포인트는 분기별로 여러 번 호출합니다(추가/취소, 내 글/남의 글, 필터 유무). 그중 하나라도 DB 오류가 나면 실패로 칩니다.
+- Spring Security는 유지했습니다. 앱 구성을 바꾸지 않고 측정하기 위해서입니다.
+
+**실패 판정**
+- 예외 체인(`perform()`이 던진 예외, `getResolvedException()`)의 원인을 끝까지 따라갑니다.
+- `DataAccessException`, `SQLException`, `JDBCException`, `PersistenceException` 중 하나라도 있으면 "스키마로 인한 실패"로 판정합니다.
+- 그 밖의 4xx/5xx는 "DB 외 실패"로 따로 기록합니다. 이번 측정에서는 0건이었습니다.
+
+**기준선**
+- 기본 스키마에서 28개 엔드포인트 모두 DB 오류가 0건입니다. 실험 전부터 깨져 있던 엔드포인트도 없습니다.
+- 예외 하나: 이 앱의 `deletePost`는 신고(`reports`)를 지우지 않아서, 신고된 글은 기본 스키마에서도 FK 오류로 삭제가 안 됩니다. 그래서 삭제 호출에는 신고가 없는 글(id 3)을 썼습니다. 이 앱의 실제 버그이고, 다음 개선 후보인 "삭제 경로의 FK 정리 누락"의 사례입니다.
+
+**비교 방법**
+- 예측: 같은 마이그레이션마다 SchemaGuard CLI(`da5892e` 빌드)를 `--output json`으로 실행하고, `affectedApis`의 `apiId` 집합을 씁니다.
+- 실제: 시나리오별 `dbFailingApis`
+- 집계: (시나리오, API) 쌍 단위로 TP/FP/FN을 셉니다. 정밀도 = TP / (TP+FP), 재현율 = TP / (TP+FN)
+- 재현: `scripts/accuracy/predict.sh <community> <out>`로 예측을 만들고, `python scripts/accuracy/compare.py actual.json <out> --codes <out>/codes.txt`로 비교합니다.
+
+### 결과
+
+**시나리오별**
+
+| 마이그레이션 | 내용 | 종료 코드 | 실제 실패 | 예측 | TP | FP | FN |
+|---|---|---:|---:|---:|---:|---:|---:|
+| V0 | users.email 삭제, comments.post_id 삭제 등 | 1 | 18 | 16 | 16 | 0 | 2 |
+| V2 | users.nickname 삭제, posts.title 이름 변경 | 1 | 20 | 18 | 18 | 0 | 2 |
+| V3 | posts.title → subject | 1 | 14 | 11 | 11 | 0 | 3 |
+| V4 | users.age 타입 변경 (엔티티에 없는 컬럼) | 0 | 0 | 0 | 0 | 0 | 0 |
+| V5 | `MODIFY nickname VARCHAR(50) NOT NULL` | 1 | 0 | 15 | 0 | 15 | 0 |
+| V6 | comments 테이블 삭제 | 1 | 4 | 4 | 4 | 0 | 0 |
+| V7 | FK `fk_posts_author` 삭제 | 1 | 0 | 11 | 0 | 11 | 0 |
+| V8 | comments.post_id 삭제 | 1 | 4 | 4 | 4 | 0 | 0 |
+| V9 | posts.category_id FK가 users를 참조하도록 변경 | 1 | 0 | 18 | 0 | 18 | 0 |
+| V10 | post_likes.user_id FK 추가 | 0 | 0 | 0 | 0 | 0 | 0 |
+| V11 | users.email 삭제 | 1 | 18 | 15 | 15 | 0 | 3 |
+| V13 | notifications.is_read → read_flag | 1 | 5 | 6 | 5 | 1 | 0 |
+| V14 | post_tags FK 재정의(CASCADE) + tags.use_count 삭제 | 1 | 4 | 5 | 4 | 1 | 0 |
+| V15 | tags → hashtags | 1 | 5 | 5 | 5 | 0 | 0 |
+| V16 | reports.reason `VARCHAR(200) NOT NULL`, UNIQUE 추가, DEFAULT 변경 | 1 | 0 | 5 | 0 | 5 | 0 |
+| V17 | bookmarks.post_id 삭제 | 1 | 3 | 3 | 3 | 0 | 0 |
+| **합계** | | | **95** | **136** | **85** | **51** | **10** |
+
+**지표**
+
+| 기준 | 정밀도 | 재현율 |
+|---|---:|---:|
+| 전체 (API 단위) | 62.5% (85/136) | **89.5% (85/95)** |
+| 구조 변경 시나리오 9개 (V0, V2, V3, V6, V8, V11, V13, V15, V17) | **98.8% (81/82)** | 89.0% (81/91) |
+| 혼합 시나리오 1개 (V14) | 80.0% (4/5) | 100% (4/4) |
+| 제약·타입만 바꾼 시나리오 6개 (V4, V5, V7, V9, V10, V16) | 0% (0/49) | (실제 실패 없음) |
+| 마이그레이션 단위 (차단 여부) | 71.4% (10/14) | **100% (10/10)** |
+
+이번 측정에서 예측한 영향은 모두 HIGH 위험이었습니다. 그래서 "HIGH만" 기준으로 계산해도 지표가 같습니다.
+
+### 놓친 10건(FN) 분석: 연관 엔티티 로딩
+
+10건 모두 오류가 `Unknown column '<별칭>.<컬럼>' in 'field list'` 형태입니다. **조회하는 엔티티가 아니라 연관된 다른 엔티티의 컬럼**에서 났습니다.
+
+| 시나리오 | API | 실제 오류 | 경로 |
+|---|---|---|---|
+| V0, V11 | `GET /` | `a1_0.email` | `PostRepository`의 `@EntityGraph(attributePaths = {"author", "category"})`가 게시글 목록을 조회할 때 작성자(User) 컬럼 전체를 JOIN으로 읽음 |
+| V11 | `POST /posts/{id}/delete` | `a1_0.email` | 같은 이유 (게시글 조회 시 author 로딩) |
+| V0, V11 | `GET /api/admin/reports` | `r2_0.email` | 신고 목록을 응답으로 만들 때 신고자(User)를 지연 로딩 |
+| V2, V3 | `GET /api/admin/reports`, `POST /api/admin/reports/{reportId}/accept` | `p1_0.title` | 신고 → 게시글(Post) 로딩 |
+| V3 | `GET /api/bookmarks` | `p1_0.title` | `BookmarkRepository`의 `@EntityGraph({"post", "post.author"})` |
+
+SchemaGuard는 "컬럼 → 그 컬럼을 가진 엔티티의 필드 → **그 엔티티의** Repository"로만 따라갑니다. JPA는 연관 엔티티를 로딩할 때(EntityGraph, fetch join, 지연 로딩 프록시 초기화) 그 엔티티의 **모든 컬럼**을 SELECT합니다. 그래서 `users.email`을 지우면 User를 연관으로 가진 Post, Report, Bookmark를 조회하는 API도 실제로 깨집니다.
+
+**개선 방향:** 컬럼 단위 변경(DROP, RENAME, MODIFY_TYPE)의 시작점에 "그 테이블을 FK로 참조하는 FK 필드"를 추가하면 됩니다. 7번에서 만든 `fkFieldsReferencingTable` 색인을 테이블 단위 변경에 이어 컬럼 단위 변경에도 쓰는 방식입니다. 10건이 모두 이 경로에 해당합니다.
+
+### 잘못 잡은 51건(FP) 분석
+
+| 원인 | 시나리오 | FP |
+|---|---|---:|
+| **제약만 바꾼 변경을 HIGH로 판정.** FK 제약을 삭제하거나 다른 테이블을 참조하게 바꿔도 SELECT, UPDATE, DELETE 쿼리 자체는 깨지지 않습니다. V9에서 새 FK에 위반되는 INSERT가 있으면 실패하겠지만, 시드에서 users와 categories의 id 범위(1~3)가 겹쳐 재현되지 않았습니다. | V7, V9, V14(FK 재정의 부분) | 30 |
+| **데이터에 따라 달라지는 타입·NOT NULL 변경을 HIGH로 판정.** `VARCHAR(100)→(50) NOT NULL`, `VARCHAR(200) NOT NULL`은 기존 값이 짧고 NULL이 없으면 성공하고, 이후 쓰기도 정상 값이면 실패하지 않습니다. 파서가 `MODIFY`를 모두 `MODIFY_TYPE`(HIGH)으로 분류하는 것도 원인입니다. | V5, V16 | 20 |
+| **메서드 단위 근사.** `POST /api/admin/reports/{reportId}/reject`는 알림 테이블을 쓰는 경로가 그래프에 연결되어 있지만, 실제로 거절 분기에서는 알림 컬럼을 건드리지 않습니다. | V13 | 1 |
+
+FP 51건 중 50건은 그래프 탐색의 문제가 아닙니다. **변경 종류별 위험도 판정**에서 나왔습니다. 개선 방향은 다음과 같습니다.
+- FK 제약 삭제는 "쿼리 오류 위험 없음, 무결성 위험"으로 내립니다(LOW).
+- FK 참조 변경은 쓰기 경로(INSERT/UPDATE)만 영향으로 봅니다.
+- `MODIFY`는 이전 타입과 비교해 실제 타입 변경인지, 줄이는 변경인지, NOT NULL만 추가하는지 구분합니다. 이전 마이그레이션이나 엔티티의 `@Column(length)`를 보면 알 수 있습니다.
+
+### 측정의 한계
+
+- 시드 데이터에 따라 결과가 달라지는 시나리오가 있습니다(V5, V9, V16). 예를 들어 50자가 넘는 닉네임이나 users에 없는 category_id를 시드에 넣으면 실제 실패가 생깁니다. 이번 측정은 "정상 데이터에서 쿼리가 깨지는가"를 기준으로 했습니다.
+- 데이터를 매번 마이그레이션 이후 스냅샷으로 되돌리므로, 마이그레이션이 지운 데이터는 복원되지 않습니다.
+- 엔드포인트 호출 값(파라미터, 폼, 분기)은 하네스에서 직접 정했습니다. 호출하지 않은 분기의 실패는 측정되지 않습니다.
+- 대상 앱이 하나(엔드포인트 28개)입니다. 수치는 이 앱 기준이고, 일반화하려면 다른 프로젝트에서도 측정해야 합니다.
+
+### 부수 결과
+
+- `community`에 로컬 실행 환경을 만들었습니다.
+  - Docker 컨테이너 `community-mysql`(포트 3307)에 기본 스키마와 시드를 넣었습니다.
+  - gitignore 대상인 `application.properties`를 만들었습니다(`ddl-auto=validate`).
+  - 이전에 실패하던 `CommunityApplicationTests.contextLoads`가 통과합니다.
+  - `bootRun` 후 폼 로그인(alice@example.com / password1234)과 주요 페이지가 정상 동작합니다.
+- 이 정확도 테스트는 일반 `./gradlew test`에도 포함되어 있어서, community의 테스트 시간이 약 13분 늘었습니다. 태그로 분리하는 것이 다음 할 일입니다.
+
+---
+
 ## 8. 같은 입력이면 같은 결과 (결정성)
 
 **문제**
