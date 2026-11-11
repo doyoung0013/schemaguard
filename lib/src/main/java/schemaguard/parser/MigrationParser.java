@@ -5,7 +5,6 @@ import schemaguard.model.RiskLevel;
 import schemaguard.model.SchemaChange;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.statement.Statement;
-import net.sf.jsqlparser.statement.Statements;
 import net.sf.jsqlparser.statement.alter.Alter;
 import net.sf.jsqlparser.statement.alter.AlterExpression;
 import net.sf.jsqlparser.statement.drop.Drop;
@@ -20,21 +19,30 @@ import java.util.regex.Pattern;
 /**
  * SQL 마이그레이션 파일을 파싱하여 SchemaChange 목록을 추출한다.
  *
+ * 파일을 구문(;) 단위로 나눠 하나씩 파싱한다. 한 구문이 실패해도 나머지 구문의
+ * 변경 사항은 그대로 탐지하고, 실패한 구문은 ParseResult.failures()로 돌려준다.
+ * 호출 측(CLI)은 실패가 하나라도 있으면 "분석 불완전"으로 보고 통과시키지 않아야 한다.
+ *
  * JSQLParser가 일부 MySQL FK DDL 문법을 파싱하지 못하는 문제를 보완하기 위해
- * DROP FOREIGN KEY / ADD FOREIGN KEY 구문은 정규식으로 먼저 추출한다.
+ * DROP FOREIGN KEY / ADD FOREIGN KEY 구문은 정규식으로 먼저 처리한다.
  */
 public class MigrationParser {
 
+    /** 식별자: users, `users`, "users", db.users, `db`.`users` */
+    private static final String IDENT = "([`\"\\w.]+)";
+
     /** ALTER TABLE t DROP FOREIGN KEY fk_name */
     private static final Pattern DROP_FK_PATTERN = Pattern.compile(
-            "ALTER\\s+TABLE\\s+(\\w+)\\s+DROP\\s+FOREIGN\\s+KEY\\s+(\\w+)",
+            "ALTER\\s+TABLE\\s+" + IDENT + "\\s+DROP\\s+FOREIGN\\s+KEY\\s+" + IDENT + "\\s*",
             Pattern.CASE_INSENSITIVE
     );
 
-    /** ALTER TABLE t ADD [CONSTRAINT name] FOREIGN KEY (col) REFERENCES ref(rc) */
+    /** ALTER TABLE t ADD [CONSTRAINT name] FOREIGN KEY (col) REFERENCES ref(rc) [ON DELETE|UPDATE ...] */
     private static final Pattern ADD_FK_PATTERN = Pattern.compile(
-            "ALTER\\s+TABLE\\s+(\\w+)\\s+ADD\\s+(?:CONSTRAINT\\s+(\\w+)\\s+)?" +
-                    "FOREIGN\\s+KEY\\s*\\(([^)]+)\\)\\s+REFERENCES\\s+(\\w+)\\s*\\(([^)]+)\\)",
+            "ALTER\\s+TABLE\\s+" + IDENT + "\\s+ADD\\s+(?:CONSTRAINT\\s+" + IDENT + "\\s+)?" +
+                    "FOREIGN\\s+KEY\\s*\\(([^)]+)\\)\\s+REFERENCES\\s+" + IDENT + "\\s*\\(([^)]+)\\)" +
+                    "(?:\\s+ON\\s+(?:DELETE|UPDATE)\\s+" +
+                    "(?:CASCADE|RESTRICT|SET\\s+NULL|SET\\s+DEFAULT|NO\\s+ACTION))*\\s*",
             Pattern.CASE_INSENSITIVE
     );
 
@@ -42,89 +50,164 @@ public class MigrationParser {
     private static final Pattern FK_COLUMN_SUFFIX =
             Pattern.compile(".*_(id|fk|key)$", Pattern.CASE_INSENSITIVE);
 
-    public List<SchemaChange> parse(File sqlFile) throws Exception {
+    /** 파싱하지 못한 구문. line은 SQL 파일 내 구문 시작 줄(1부터). */
+    public record ParseFailure(int line, String statement, String reason) {}
+
+    /**
+     * @param changes         탐지된 스키마 변경
+     * @param failures        파싱 실패한 구문 (비어 있지 않으면 분석 결과는 불완전하다)
+     * @param totalStatements 파일 내 전체 구문 수 (주석/빈 구문 제외)
+     */
+    public record ParseResult(List<SchemaChange> changes,
+                              List<ParseFailure> failures,
+                              int totalStatements) {
+        public boolean hasFailures() {
+            return !failures.isEmpty();
+        }
+    }
+
+    private record SqlStatement(int line, String text) {}
+
+    public ParseResult parse(File sqlFile) throws Exception {
         return parseSQL(Files.readString(sqlFile.toPath()));
     }
 
-    public List<SchemaChange> parseSQL(String sql) {
+    public ParseResult parseSQL(String sql) {
         List<SchemaChange> changes = new ArrayList<>();
+        List<ParseFailure> failures = new ArrayList<>();
+        List<SqlStatement> statements = splitStatements(sql);
 
-        String sanitized = extractFkChanges(sql, changes);
-
-        sanitized = sanitized.replaceAll(";\\s*;", ";").trim();
-
-        if (!sanitized.isEmpty() && !sanitized.equals(";")) {
-            if (!sanitized.endsWith(";")) {
-                sanitized += ";";
+        for (SqlStatement stmt : statements) {
+            try {
+                changes.addAll(parseStatement(stmt.text()));
+            } catch (Exception e) {
+                failures.add(new ParseFailure(stmt.line(), stmt.text(), firstLine(e)));
             }
-
-            changes.addAll(parseBySqlParser(sanitized));
         }
 
-        return changes;
+        promoteFkModify(changes);
+
+        return new ParseResult(changes, failures, statements.size());
     }
 
-    /**
-     * DROP FOREIGN KEY / ADD FOREIGN KEY 구문을 정규식으로 추출한 뒤
-     * 원본 SQL에서 해당 구문을 제거한 문자열을 반환한다.
-     */
-    private String extractFkChanges(String sql, List<SchemaChange> out) {
-        String remaining = sql;
-
-        // DROP FOREIGN KEY fk_name
-        Matcher dropMatcher = DROP_FK_PATTERN.matcher(remaining);
-        while (dropMatcher.find()) {
-            String table = dropMatcher.group(1).toLowerCase();
-            String fkName = dropMatcher.group(2).toLowerCase();
-
-            out.add(new SchemaChange(
-                    table,
+    /** 구문 하나를 파싱한다. 파싱할 수 없으면 예외를 던진다. */
+    private List<SchemaChange> parseStatement(String sql) throws Exception {
+        Matcher dropFk = DROP_FK_PATTERN.matcher(sql);
+        if (dropFk.matches()) {
+            return List.of(new SchemaChange(
+                    ident(dropFk.group(1)),
                     null,
                     null,
                     ChangeType.DROP_FOREIGN_KEY,
                     RiskLevel.HIGH,
-                    fkName,
+                    ident(dropFk.group(2)),
                     null,
                     null
             ));
-
-            remaining = removeSqlStatement(remaining, dropMatcher.group(0));
-
-            // remaining이 바뀌었으므로 Matcher 재생성
-            dropMatcher = DROP_FK_PATTERN.matcher(remaining);
         }
 
-        // ADD FOREIGN KEY (col) REFERENCES ref(rc)
-        Matcher addMatcher = ADD_FK_PATTERN.matcher(remaining);
-        while (addMatcher.find()) {
-            String table = addMatcher.group(1).toLowerCase();
-            String constraint = addMatcher.group(2) != null
-                    ? addMatcher.group(2).toLowerCase()
-                    : null;
-            String column = addMatcher.group(3).trim().toLowerCase();
-            String refTable = addMatcher.group(4).toLowerCase();
-            String refColumn = addMatcher.group(5).trim().toLowerCase();
-
-            out.add(new SchemaChange(
-                    table,
-                    column,
+        Matcher addFk = ADD_FK_PATTERN.matcher(sql);
+        if (addFk.matches()) {
+            return List.of(new SchemaChange(
+                    ident(addFk.group(1)),
+                    columnList(addFk.group(3)),
                     null,
                     ChangeType.ADD_FOREIGN_KEY,
                     RiskLevel.MEDIUM,
-                    constraint,
-                    refTable,
-                    refColumn
+                    addFk.group(2) != null ? ident(addFk.group(2)) : null,
+                    ident(addFk.group(4)),
+                    columnList(addFk.group(5))
             ));
-
-            remaining = removeSqlStatement(remaining, addMatcher.group(0));
-
-            // remaining이 바뀌었으므로 Matcher 재생성
-            addMatcher = ADD_FK_PATTERN.matcher(remaining);
         }
 
-        promoteFkModify(out);
+        Statement stmt = CCJSqlParserUtil.parse(sql);
+        if (stmt instanceof Alter alter) {
+            return handleAlter(alter);
+        }
+        if (stmt instanceof Drop drop) {
+            return List.of(handleDrop(drop));
+        }
+        return List.of();
+    }
 
-        return remaining;
+    /**
+     * SQL을 세미콜론 기준으로 구문 단위로 나눈다.
+     * 따옴표('...', "...", `...`) 안의 세미콜론은 구분자로 보지 않고,
+     * 주석(--, #, / * * /)은 제거한다. 각 구문의 시작 줄 번호를 함께 기록한다.
+     */
+    private static List<SqlStatement> splitStatements(String sql) {
+        List<SqlStatement> result = new ArrayList<>();
+        StringBuilder cur = new StringBuilder();
+        int line = 1;
+        int startLine = -1;
+        char quote = 0;
+        int n = sql.length();
+
+        for (int i = 0; i < n; i++) {
+            char c = sql.charAt(i);
+            char next = i + 1 < n ? sql.charAt(i + 1) : 0;
+
+            if (quote != 0) {
+                cur.append(c);
+                if (c == '\\' && quote != '`' && i + 1 < n) {       // MySQL 백슬래시 이스케이프
+                    cur.append(next);
+                    i++;
+                    if (next == '\n') line++;
+                } else if (c == quote) {
+                    if (next == quote) {                            // '' 이스케이프
+                        cur.append(next);
+                        i++;
+                    } else {
+                        quote = 0;
+                    }
+                } else if (c == '\n') {
+                    line++;
+                }
+                continue;
+            }
+
+            if ((c == '-' && next == '-') || c == '#') {            // 한 줄 주석
+                while (i < n && sql.charAt(i) != '\n') i++;
+                if (i < n) {
+                    cur.append('\n');
+                    line++;
+                }
+                continue;
+            }
+
+            if (c == '/' && next == '*') {                          // 블록 주석
+                int end = sql.indexOf("*/", i + 2);
+                int stop = end < 0 ? n : end + 2;
+                for (int k = i; k < stop; k++) {
+                    if (sql.charAt(k) == '\n') line++;
+                }
+                cur.append(' ');
+                i = stop - 1;
+                continue;
+            }
+
+            if (c == ';') {
+                flush(cur, startLine, result);
+                startLine = -1;
+                continue;
+            }
+
+            if (c == '\'' || c == '"' || c == '`') quote = c;
+            if (startLine < 0 && !Character.isWhitespace(c)) startLine = line;
+            cur.append(c);
+            if (c == '\n') line++;
+        }
+
+        flush(cur, startLine, result);
+        return result;
+    }
+
+    private static void flush(StringBuilder cur, int startLine, List<SqlStatement> out) {
+        String text = cur.toString().trim();
+        if (!text.isEmpty()) {
+            out.add(new SqlStatement(startLine, text));
+        }
+        cur.setLength(0);
     }
 
     /**
@@ -162,36 +245,9 @@ public class MigrationParser {
         }
     }
 
-    /**
-     * SQL에서 특정 구문과 뒤따르는 세미콜론을 제거한다.
-     */
-    private String removeSqlStatement(String sql, String statement) {
-        return sql.replaceFirst(Pattern.quote(statement) + "\\s*;?", "").trim();
-    }
-
-    private List<SchemaChange> parseBySqlParser(String sql) {
-        List<SchemaChange> result = new ArrayList<>();
-
-        try {
-            Statements statements = CCJSqlParserUtil.parseStatements(sql);
-
-            for (Statement stmt : statements.getStatements()) {
-                if (stmt instanceof Alter alter) {
-                    result.addAll(handleAlter(alter));
-                } else if (stmt instanceof Drop drop) {
-                    result.add(handleDrop(drop));
-                }
-            }
-        } catch (Exception e) {
-            System.err.println("  [WARN] JSQLParser failed to parse a statement: " + e.getMessage());
-        }
-
-        return result;
-    }
-
     private List<SchemaChange> handleAlter(Alter alter) {
         List<SchemaChange> result = new ArrayList<>();
-        String table = alter.getTable().getName().toLowerCase();
+        String table = ident(alter.getTable().getName());
 
         for (AlterExpression expr : alter.getAlterExpressions()) {
             String operation = expr.getOperation().name().toUpperCase();
@@ -200,7 +256,7 @@ public class MigrationParser {
             switch (operation) {
                 case "DROP" -> {
                     if (expr.getColumnName() != null) {
-                        String col = expr.getColumnName().toLowerCase();
+                        String col = ident(expr.getColumnName());
 
                         ChangeType type = isFkColumn(col)
                                 ? ChangeType.DROP_FK_COLUMN
@@ -219,8 +275,8 @@ public class MigrationParser {
                     if (expr.getColumnName() != null && expr.getColumnOldName() != null) {
                         result.add(new SchemaChange(
                                 table,
-                                expr.getColumnOldName().toLowerCase(),
-                                expr.getColumnName().toLowerCase(),
+                                ident(expr.getColumnOldName()),
+                                ident(expr.getColumnName()),
                                 ChangeType.RENAME_COLUMN,
                                 RiskLevel.HIGH
                         ));
@@ -229,10 +285,9 @@ public class MigrationParser {
 
                 case "MODIFY", "CHANGE" -> {
                     if (expr.getColDataTypeList() != null && !expr.getColDataTypeList().isEmpty()) {
-                        String col = expr.getColDataTypeList()
+                        String col = ident(expr.getColDataTypeList()
                                 .get(0)
-                                .getColumnName()
-                                .toLowerCase();
+                                .getColumnName());
 
                         result.add(new SchemaChange(
                                 table,
@@ -260,10 +315,9 @@ public class MigrationParser {
                         ));
                     } else if (expr.getColDataTypeList() != null
                             && !expr.getColDataTypeList().isEmpty()) {
-                        String col = expr.getColDataTypeList()
+                        String col = ident(expr.getColDataTypeList()
                                 .get(0)
-                                .getColumnName()
-                                .toLowerCase();
+                                .getColumnName());
 
                         result.add(new SchemaChange(
                                 table,
@@ -273,6 +327,11 @@ public class MigrationParser {
                         ));
                     }
                 }
+
+                // JSQLParser는 모르는 ALTER 절을 예외 없이 UNSPECIFIC으로 돌려준다.
+                // 이해하지 못한 구문을 "변경 없음"으로 넘기지 않도록 실패로 처리한다.
+                case "UNSPECIFIC" -> throw new IllegalArgumentException(
+                        "Unrecognized ALTER TABLE clause: " + expr.getOptionalSpecifier());
 
                 default -> {
                     // 무시
@@ -285,7 +344,7 @@ public class MigrationParser {
 
     private SchemaChange handleDrop(Drop drop) {
         return new SchemaChange(
-                drop.getName().getName().toLowerCase(),
+                ident(drop.getName().getName()),
                 null,
                 ChangeType.DROP_TABLE,
                 RiskLevel.HIGH
@@ -298,12 +357,29 @@ public class MigrationParser {
 
     private String extractFirstColumnName(AlterExpression expr) {
         if (expr.getColDataTypeList() != null && !expr.getColDataTypeList().isEmpty()) {
-            return expr.getColDataTypeList()
+            return ident(expr.getColDataTypeList()
                     .get(0)
-                    .getColumnName()
-                    .toLowerCase();
+                    .getColumnName());
         }
 
         return "unknown";
+    }
+
+    /** `db`.`users` → users. 인용부호를 벗기고 스키마 접두어를 떼어 소문자로 만든다. */
+    private static String ident(String raw) {
+        String s = raw.replaceAll("[`\"\\[\\]]", "").trim();
+        int dot = s.lastIndexOf('.');
+        return (dot >= 0 ? s.substring(dot + 1) : s).toLowerCase();
+    }
+
+    /** FK 컬럼 목록 "(`a`, `b`)" 안쪽 → "a, b" */
+    private static String columnList(String raw) {
+        return raw.replaceAll("[`\"\\[\\]]", "").trim().toLowerCase();
+    }
+
+    private static String firstLine(Exception e) {
+        String msg = e.getMessage();
+        if (msg == null || msg.isBlank()) return e.getClass().getSimpleName();
+        return msg.strip().lines().findFirst().orElse(msg);
     }
 }

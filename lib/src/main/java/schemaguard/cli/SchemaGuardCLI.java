@@ -19,9 +19,21 @@ import java.util.concurrent.Callable;
     name        = "schemaguard",
     description = "Detects APIs affected by DB schema changes in Spring Boot + JPA projects.",
     mixinStandardHelpOptions = true,
-    version     = "SchemaGuard 1.0"
+    version     = "SchemaGuard 1.0",
+    exitCodeListHeading = "%nExit codes:%n",
+    exitCodeList = {
+        "0:No HIGH risk detected and every SQL statement was parsed.",
+        "1:HIGH risk change affects at least one API.",
+        "2:Unexpected error (e.g. migration file not found).",
+        "3:One or more SQL statements could not be parsed (analysis incomplete)."
+    }
 )
 public class SchemaGuardCLI implements Callable<Integer> {
+
+    static final int EXIT_OK            = 0;
+    static final int EXIT_HIGH_RISK     = 1;
+    static final int EXIT_ERROR         = 2;
+    static final int EXIT_PARSE_FAILURE = 3;
 
     @Option(names = {"--source", "-s"}, description = "Spring Boot 소스 루트 (src/main/java)", required = true)
     private String sourcePath;
@@ -44,11 +56,19 @@ public class SchemaGuardCLI implements Callable<Integer> {
             System.out.println();
 
             MigrationParser migrationParser = new MigrationParser();
-            List<SchemaChange> changes = migrationParser.parse(new File(migrationPath));
+            MigrationParser.ParseResult parsed = migrationParser.parse(new File(migrationPath));
+            List<SchemaChange> changes = parsed.changes();
+
+            System.out.printf("Parsed %d SQL statement(s): %d ok, %d failed%n",
+                    parsed.totalStatements(),
+                    parsed.totalStatements() - parsed.failures().size(),
+                    parsed.failures().size());
+            printParseFailures(parsed);
+            System.out.println();
 
             if (changes.isEmpty()) {
                 System.out.println("No schema changes detected in migration file.");
-                return 0;
+                return finishWithParseCheck(parsed, EXIT_OK);
             }
 
             System.out.println("Detected " + changes.size() + " schema change(s):");
@@ -105,16 +125,37 @@ public class SchemaGuardCLI implements Callable<Integer> {
 
             reporter.generate(result);
 
-            if (result.hasHighRisk()) {
-                return 1;
-            }
-
-            return 0;
+            return finishWithParseCheck(parsed, result.hasHighRisk() ? EXIT_HIGH_RISK : EXIT_OK);
 
         } catch (Exception e) {
             System.err.println("SchemaGuard error: " + e.getMessage());
             e.printStackTrace();
-            return 2;
+            return EXIT_ERROR;
+        }
+    }
+
+    /**
+     * 파싱 실패 구문이 있으면 분석 결과와 무관하게 차단한다.
+     * 검사 도구가 읽지 못한 변경은 "변경 없음"이 아니라 "알 수 없음"이기 때문이다.
+     */
+    private int finishWithParseCheck(MigrationParser.ParseResult parsed, int exitCode) {
+        if (!parsed.hasFailures()) {
+            return exitCode;
+        }
+        System.err.println();
+        System.err.printf("[BLOCKED] %d of %d SQL statement(s) could not be parsed; "
+                        + "the analysis above is incomplete. Exit code %d.%n",
+                parsed.failures().size(), parsed.totalStatements(), EXIT_PARSE_FAILURE);
+        return EXIT_PARSE_FAILURE;
+    }
+
+    private void printParseFailures(MigrationParser.ParseResult parsed) {
+        for (MigrationParser.ParseFailure f : parsed.failures()) {
+            String stmt = f.statement().replaceAll("\\s+", " ");
+            if (stmt.length() > 120) stmt = stmt.substring(0, 117) + "...";
+            System.err.printf("  [WARN] Unparsed statement at %s:%d%n", migrationPath, f.line());
+            System.err.println("         SQL   : " + stmt);
+            System.err.println("         Reason: " + f.reason());
         }
     }
 
