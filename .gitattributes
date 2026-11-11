@@ -10,3 +10,6 @@
 
 # 스냅샷 정답 파일은 OS와 무관하게 LF로 고정 (리포트도 LF로 쓴다)
 lib/src/test/resources/snapshots/*.json text eol=lf
+
+# 셸 스크립트는 CRLF면 bash에서 깨진다
+*.sh text eol=lf
