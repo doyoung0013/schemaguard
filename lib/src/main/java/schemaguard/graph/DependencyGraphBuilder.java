@@ -105,13 +105,20 @@ public class DependencyGraphBuilder {
     private void addRepositoryEdges(List<RepositoryInfo> repos,
                                     List<EntityMapping>  entities,
                                     List<FkMapping>      fkMappings) {
+        // 엔티티 클래스별로 한 번만 묶는다. 예전에는 리포지토리마다 전체 매핑 목록을 훑었다
+        // (리포지토리 수 × 전체 필드 수).
+        Map<String, List<EntityMapping>> fieldsByEntity = new HashMap<>();
+        for (EntityMapping em : entities)
+            fieldsByEntity.computeIfAbsent(em.getEntityClass(), k -> new ArrayList<>()).add(em);
+        Map<String, List<FkMapping>> fkFieldsByEntity = new HashMap<>();
+        for (FkMapping fk : fkMappings)
+            fkFieldsByEntity.computeIfAbsent(fk.getEntityClass(), k -> new ArrayList<>()).add(fk);
+
         for (RepositoryInfo repo : repos) {
             String entityClass = repo.getEntityClass();
 
-            List<EntityMapping> relatedFields = entities.stream()
-                    .filter(em -> em.getEntityClass().equals(entityClass)).toList();
-            List<FkMapping> relatedFkFields = fkMappings.stream()
-                    .filter(fk -> fk.getEntityClass().equals(entityClass)).toList();
+            List<EntityMapping> relatedFields = fieldsByEntity.getOrDefault(entityClass, List.of());
+            List<FkMapping> relatedFkFields = fkFieldsByEntity.getOrDefault(entityClass, List.of());
 
             // 선언 메서드 + 기본 CRUD
             List<RepositoryInfo.MethodEntry> allMethods =

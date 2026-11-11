@@ -11,6 +11,13 @@ public class ImpactAnalyzer {
     private final Map<String, Node> nodeIndex;
     private final Map<String, List<Node>> fkFieldsReferencingTable;
 
+    /**
+     * 테이블명 → 그 테이블의 컬럼 노드. 처음 필요할 때 nodeIndex를 한 번만 훑어 만든다.
+     * 예전에는 테이블 단위 변경마다 nodeIndex 전체를 "col:테이블." 접두사로 두 번씩 훑었다
+     * (변경 수 × 전체 노드 수).
+     */
+    private Map<String, List<Node>> columnsByTable;
+
     public ImpactAnalyzer(DefaultDirectedGraph<Node, Edge> graph, Map<String, Node> nodeIndex) {
         this(graph, nodeIndex, Map.of());
     }
@@ -134,10 +141,18 @@ public class ImpactAnalyzer {
     }
 
     private List<Node> allColumnNodesOfTable(String table) {
-        String prefix = "col:" + table + ".";
-        return nodeIndex.entrySet().stream()
-                .filter(e -> e.getKey().startsWith(prefix))
-                .map(Map.Entry::getValue).toList();
+        if (columnsByTable == null) {
+            Map<String, List<Node>> index = new HashMap<>();
+            for (Map.Entry<String, Node> e : nodeIndex.entrySet()) {
+                String id = e.getKey();
+                if (!id.startsWith("col:")) continue;
+                int dot = id.lastIndexOf('.');      // "col:<table>.<column>", 컬럼명에는 '.'이 없다
+                if (dot <= 4) continue;
+                index.computeIfAbsent(id.substring(4, dot), t -> new ArrayList<>()).add(e.getValue());
+            }
+            columnsByTable = index;
+        }
+        return columnsByTable.getOrDefault(table, List.of());
     }
 
     private List<Node> allFkFieldNodesOfTable(String table) {

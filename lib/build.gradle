@@ -72,6 +72,20 @@ tasks.register('benchmark', JavaExec) {
     }
 }
 
+// 규모별 그래프 생성/영향 분석 성능 (노드·엣지 수, 변경 수별 분석 시간)
+//   ./gradlew scaleBenchmark
+//   ./gradlew scaleBenchmark -PbenchArgs="--sizes 1000,5000 --changes 12,1000"
+tasks.register('scaleBenchmark', JavaExec) {
+    group = 'verification'
+    description = 'Benchmarks graph building and impact analysis at increasing project sizes.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'schemaguard.bench.ScaleBenchmark'
+    def benchArgs = project.findProperty('benchArgs')
+    if (benchArgs) {
+        args benchArgs.toString().trim().split(/\s+/)
+    }
+}
+
 jar {
     manifest {
         attributes(
