@@ -53,6 +53,9 @@ public class SchemaGuardCLI implements Callable<Integer> {
                     + "(json 모드 기본값: " + DEFAULT_REPORT_PATH + ")")
     private String reportPath;
 
+    @Option(names = "--timing", description = "구간별 소요 시간(파일 수집/파싱/그래프/분석) 출력")
+    private boolean timing;
+
     @Override
     public Integer call() {
         try {
@@ -100,49 +103,42 @@ public class SchemaGuardCLI implements Callable<Integer> {
     }
 
     private ImpactResult analyze(List<SchemaChange> changes, List<String> sourceParseFailures) {
-        List<File> javaFiles = collectJavaFiles(new File(sourcePath));
+        long t0 = System.nanoTime();
+        List<File> javaFiles = SourceScanner.collectJavaFiles(new File(sourcePath));
+        long t1 = System.nanoTime();
         System.out.println("Scanning " + javaFiles.size() + " Java source files...");
 
-        EntityParser entityParser = new EntityParser();
-        RepositoryParser repositoryParser = new RepositoryParser();
-        ServiceParser serviceParser = new ServiceParser();
-        ControllerParser controllerParser = new ControllerParser();
+        // 파일당 한 번 파싱한 AST를 네 추출기가 공유한다.
+        SourceScanner.Result scan = new SourceScanner().scan(javaFiles);
+        sourceParseFailures.addAll(scan.failedFiles());
+        long t2 = System.nanoTime();
 
-        List<EntityMapping> entities = new ArrayList<>();
-        List<FkMapping> fkMappings = new ArrayList<>();
-        List<RepositoryInfo> repos = new ArrayList<>();
-        List<ServiceInfo> services = new ArrayList<>();
-        List<ControllerInfo> controllers = new ArrayList<>();
-
-        for (File javaFile : javaFiles) {
-            try {
-                EntityParser.ParseResult pr = entityParser.parse(javaFile);
-                entities.addAll(pr.entityMappings());
-                fkMappings.addAll(pr.fkMappings());
-
-                repos.addAll(repositoryParser.parse(javaFile));
-                services.addAll(serviceParser.parse(javaFile));
-                controllers.addAll(controllerParser.parse(javaFile));
-            } catch (Exception e) {
-                System.err.println("  [WARN] Parse failed: " + javaFile.getName()
-                        + " (" + e.getMessage() + ")");
-                sourceParseFailures.add(javaFile.getPath());
-            }
-        }
-
-        System.out.println("  Entities    : " + entities.size() + " fields");
-        System.out.println("  FK Mappings : " + fkMappings.size() + " relations");
-        System.out.println("  Repositories: " + repos.size());
-        System.out.println("  Services    : " + services.size());
-        System.out.println("  Controllers : " + controllers.size());
+        System.out.println("  Entities    : " + scan.entities().size() + " fields");
+        System.out.println("  FK Mappings : " + scan.fkMappings().size() + " relations");
+        System.out.println("  Repositories: " + scan.repositories().size());
+        System.out.println("  Services    : " + scan.services().size());
+        System.out.println("  Controllers : " + scan.controllers().size());
         System.out.println();
 
         DependencyGraphBuilder builder = new DependencyGraphBuilder();
         builder.setSourceRoot(sourcePath);   // ← 파일 위치를 상대경로로 정규화하기 위해 필요
-        builder.build(entities, fkMappings, repos, services, controllers);
+        builder.build(scan.entities(), scan.fkMappings(), scan.repositories(),
+                scan.services(), scan.controllers());
+        long t3 = System.nanoTime();
 
         ImpactAnalyzer analyzer = new ImpactAnalyzer(builder.getGraph(), builder.getNodeIndex());
-        return analyzer.analyze(changes);
+        ImpactResult result = analyzer.analyze(changes);
+        long t4 = System.nanoTime();
+
+        if (timing) {
+            System.out.printf("Timing (ms): collect %.1f | parse %.1f (%d parse calls) | graph %.1f | analyze %.1f%n%n",
+                    ms(t1 - t0), ms(t2 - t1), scan.parseCalls(), ms(t3 - t2), ms(t4 - t3));
+        }
+        return result;
+    }
+
+    private static double ms(long nanos) {
+        return nanos / 1_000_000.0;
     }
 
     /**
@@ -189,27 +185,4 @@ public class SchemaGuardCLI implements Callable<Integer> {
         }
     }
 
-    private List<File> collectJavaFiles(File dir) {
-        List<File> result = new ArrayList<>();
-
-        if (!dir.exists() || !dir.isDirectory()) {
-            return result;
-        }
-
-        File[] files = dir.listFiles();
-
-        if (files == null) {
-            return result;
-        }
-
-        for (File f : files) {
-            if (f.isDirectory()) {
-                result.addAll(collectJavaFiles(f));
-            } else if (f.getName().endsWith(".java")) {
-                result.add(f);
-            }
-        }
-
-        return result;
-    }
 }

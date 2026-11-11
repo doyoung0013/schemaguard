@@ -52,6 +52,20 @@ tasks.named('test') {
     useJUnitPlatform()
 }
 
+// Java 소스 파싱 벤치마크 (legacy: 파서별 파싱 vs shared: 파일당 1회 파싱)
+//   ./gradlew benchmark
+//   ./gradlew benchmark -PbenchArgs="--sizes 100,1000 --reps 5 --xmx 1g"
+tasks.register('benchmark', JavaExec) {
+    group = 'verification'
+    description = 'Benchmarks Java source scanning on generated sample projects.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'schemaguard.bench.ParseBenchmark'
+    def benchArgs = project.findProperty('benchArgs')
+    if (benchArgs) {
+        args benchArgs.toString().trim().split(/\s+/)
+    }
+}
+
 jar {
     manifest {
         attributes(

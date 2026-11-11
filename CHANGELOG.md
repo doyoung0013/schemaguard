@@ -15,6 +15,86 @@
 
 ---
 
+## 6. Java 파일 중복 파싱 제거 (파일당 4회 → 1회)
+
+**문제**
+
+`SchemaGuardCLI`가 Java 파일마다 `EntityParser`, `RepositoryParser`, `ServiceParser`, `ControllerParser`의 `parse(File)`를 차례로 호출했습니다. 각 파서가 안에서 `StaticJavaParser.parse()`를 따로 실행하기 때문에, 파일 N개를 분석하면 **파싱이 4N번** 일어났습니다.
+
+**측정 방법**
+
+- `SampleProjectGenerator`가 Entity·Repository·Service·Controller가 서로 연결된 샘플 프로젝트를 100 / 1,000 / 5,000 파일 규모로 만듭니다. FK, 서비스 간 호출, 엔드포인트 2개, 파일당 보조 메서드 8개를 넣었습니다. 마이그레이션에는 DROP COLUMN 10개, MODIFY 1개, RENAME TABLE 1개가 들어갑니다.
+- `ParseBenchmark`가 `legacy`(개선 전 스캔 루프를 그대로 옮긴 것)와 `shared`(개선 후)를 **각각 별도 JVM**에서 3회씩 번갈아 실행하고 중앙값을 냅니다.
+- 구간: collect(파일 수집 + SQL 파싱) / parse(Java 파싱 + 추출) / graph(그래프 생성) / analyze(BFS)
+- 메모리:
+  - **파싱 단계 할당량**: parse 구간에서 새로 할당한 바이트 수 (`ThreadMXBean`)
+  - **분석 후 유지 힙**: 분석이 끝나고 GC 직후 남아 있는 힙. AST가 쌓여 남지 않는지 확인하는 용도입니다.
+  - 최대 힙(샘플링): 2ms 간격 샘플링. GC 정책에 좌우되므로 참고용입니다.
+- 결과 일치: 영향 API·원인·경로(파일:라인), 그래프 노드·엣지, 추출 개수 전체를 정렬해 SHA-256으로 비교합니다.
+- 실행: `./gradlew benchmark` (옵션 `-PbenchArgs="--sizes 100,1000,5000 --reps 3 --xmx 2g"`). 결과는 `lib/build/reports/benchmark/parse-benchmark.md`에 저장됩니다.
+
+**원인 확인 (개선 전 구간별 시간)**
+
+| 파일 수 | collect | parse | graph | analyze | 전체 | parse 비중 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 100 | 112 ms | 1.34 s | 111 ms | 16 ms | 1.58 s | 85% |
+| 1,000 | 185 ms | 5.49 s | 85 ms | 15 ms | 5.77 s | 95% |
+| 5,000 | 453 ms | 34.24 s | 355 ms | 25 ms | 35.14 s | 97% |
+
+규모가 커질수록 전체 시간의 대부분이 Java 파싱이었습니다. 그래프 생성과 BFS는 병목이 아니었습니다.
+
+**변경**
+
+- `SourceScanner`(신규): 파일당 `StaticJavaParser.parse()`를 **한 번만** 호출하고, 만든 AST(`CompilationUnit`)를 네 추출기가 공유합니다. AST는 파일 하나를 처리한 뒤 바로 참조를 놓으므로 메모리에 남는 AST는 최대 한 개입니다. 파싱 호출 수와 실패 파일 목록도 함께 돌려줍니다.
+- 파서 4개에 `parse(CompilationUnit cu, String filePath)`를 추가했습니다. 기존 `parse(File)`, `parseSource(String)`는 그대로 남겨 호환성을 유지합니다.
+- `SchemaGuardCLI`가 `SourceScanner`를 사용합니다. Java 파일 수집 함수도 `SourceScanner.collectJavaFiles`로 옮겼습니다.
+- `--timing` 옵션(신규)을 주면 구간별 소요 시간과 파싱 호출 수를 출력합니다.
+
+  ```
+  Timing (ms): collect 76.2 | parse 2523.5 (1000 parse calls) | graph 128.1 | analyze 12.0
+  ```
+
+**결과 (3회 중앙값, 각 실행 별도 JVM, -Xmx2g, Java 17)**
+
+| 파일 수 | 모드 | 파싱 호출 | parse | 전체 | 파싱 단계 할당량 | 분석 후 유지 힙 | 결과 일치 |
+|---:|---|---:|---:|---:|---:|---:|---|
+| 100 | 개선 전 | 400 | 1.34 s | 1.58 s | 373 MB | 3.4 MB | ✅ |
+| 100 | 개선 후 | 100 | 0.73 s | 0.98 s | 113 MB | 3.4 MB | ✅ |
+| 1,000 | 개선 전 | 4,000 | 5.49 s | 5.77 s | 3,442 MB | 8.1 MB | ✅ |
+| 1,000 | 개선 후 | 1,000 | 2.57 s | 2.92 s | 925 MB | 8.1 MB | ✅ |
+| 5,000 | 개선 전 | 20,000 | 34.24 s | 35.14 s | 17,053 MB | 30.4 MB | ✅ |
+| 5,000 | 개선 후 | 5,000 | 10.60 s | 11.46 s | 4,455 MB | 30.5 MB | ✅ |
+
+| 파일 수 | 파싱 호출 | parse 구간 | 전체 | 파싱 단계 할당량 |
+|---:|---:|---:|---:|---:|
+| 100 | 4배 감소 | 1.8배 빠름 | 1.6배 빠름 | 3.3배 감소 |
+| 1,000 | 4배 감소 | 2.1배 빠름 | 2.0배 빠름 | 3.7배 감소 |
+| 5,000 | 4배 감소 | 3.2배 빠름 | 3.1배 빠름 | 3.8배 감소 |
+
+**해석**
+
+- 파싱 호출이 4배 줄었다고 전체 시간이 4배 줄지는 않습니다. 파일 읽기, 추출, 그래프 생성 같은 고정 비용이 남아 있고, 규모가 작을수록 JVM 시작과 JIT 워밍업 비중이 큽니다. 규모가 커질수록 개선 폭이 4배에 가까워집니다.
+- 파싱 단계 할당량이 약 3.8배 줄어 GC 부담이 함께 줄었습니다.
+- 분석 후 유지 힙은 두 방식이 같습니다. 개선 전에도 AST는 파일마다 버려지고 있었고, 개선 후에도 AST가 쌓이지 않는다는 뜻입니다. 최대 힙(샘플링)은 두 방식 모두 약 160MB로 큰 차이가 없습니다. JVM이 GC를 돌리기 전에 기본 힙 크기까지 채우기 때문입니다.
+- 같은 조건에서도 실행마다 ±20% 정도 편차가 있었습니다(예: 1,000개 legacy 5.2~5.8 s). 그래서 3회 중앙값을 사용했습니다.
+
+**기존 결과와의 일치 확인**
+
+- 벤치마크: 세 규모 모두 legacy와 shared의 결과 지문(SHA-256)이 일치했습니다.
+- 실제 CLI: 이전 커밋으로 빌드한 CLI와 새 CLI를 1,000개, 5,000개 샘플에 실행했습니다. JSON 리포트가 **바이트 단위로 동일**했고(영향 API 36개), 종료 코드도 같았습니다(1).
+- `SourceScannerTest`(신규): 파싱 호출 수 = 파일 수, 파서별 개별 파싱 결과와 추출 개수 일치, 문법 오류 파일은 실패 목록에 들어가고 나머지는 정상 분석되는지 확인합니다.
+
+**남은 병목 (후속 후보)**
+
+개선 후에도 5,000개 기준 전체 시간의 92%가 parse 구간입니다. 다음 후보는 이렇습니다.
+
+- 파일 단위 병렬 파싱. 현재 `StaticJavaParser`는 전역 설정을 공유하므로, 스레드별 `JavaParser` 인스턴스로 바꿔야 합니다.
+- 관련 어노테이션(`@Entity`, `@Service` 등)이나 `Repository` 상속이 없는 파일은 파싱 전에 건너뛰기
+
+**관련 파일**: `SourceScanner.java`(신규), `EntityParser.java`, `RepositoryParser.java`, `ServiceParser.java`, `ControllerParser.java`, `SchemaGuardCLI.java`, `lib/build.gradle`(`benchmark` 태스크), `bench/SampleProjectGenerator.java`·`bench/ParseBenchmark.java`(신규, 테스트 소스), `SourceScannerTest.java`(신규)
+
+---
+
 ## 5. GitHub Actions 워크플로 수정본 추가
 
 `readme.md`의 워크플로 예시는 수정하지 않았습니다. 고친 버전은 **`examples/github-actions/schemaguard.yml`** 에 있습니다. 검사 대상 프로젝트의 `.github/workflows/`에 이 파일을 복사하면 됩니다.

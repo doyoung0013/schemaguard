@@ -29,6 +29,11 @@ public class ControllerParser {
         return extract(StaticJavaParser.parse(javaFile), javaFile.getAbsolutePath());
     }
 
+    /** 이미 파싱된 AST에서 추출한다. SourceScanner가 파일당 한 번 파싱한 결과를 공유할 때 사용. */
+    public List<ControllerInfo> parse(CompilationUnit cu, String filePath) {
+        return extract(cu, filePath);
+    }
+
     public List<ControllerInfo> parseSource(String sourceCode) throws Exception {
         return extract(StaticJavaParser.parse(sourceCode), null);
     }
