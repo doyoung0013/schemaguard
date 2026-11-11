@@ -10,6 +10,7 @@ import schemaguard.model.ServiceInfo;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 
 /**
@@ -66,20 +67,30 @@ public class SourceScanner {
         return new Result(entities, fkMappings, repos, services, controllers, failed, parseCalls);
     }
 
-    /** dir 아래의 .java 파일을 재귀적으로 모은다. 디렉터리가 없으면 빈 목록. */
+    /**
+     * dir 아래의 .java 파일을 재귀적으로 모은다. 디렉터리가 없으면 빈 목록.
+     *
+     * listFiles()의 순서는 OS/파일시스템마다 다르다(NTFS는 대체로 이름순, ext4는 해시 순).
+     * 파일 순서가 그래프 구성 순서와 영향 경로 선택에 번지지 않도록 경로 기준으로 정렬한다.
+     */
     public static List<File> collectJavaFiles(File dir) {
         List<File> result = new ArrayList<>();
+        collect(dir, result);
+        result.sort(Comparator.comparing(f -> f.getPath().replace('\\', '/')));
+        return result;
+    }
+
+    private static void collect(File dir, List<File> result) {
         File[] files = dir.isDirectory() ? dir.listFiles() : null;
         if (files == null) {
-            return result;
+            return;
         }
         for (File f : files) {
             if (f.isDirectory()) {
-                result.addAll(collectJavaFiles(f));
+                collect(f, result);
             } else if (f.getName().endsWith(".java")) {
                 result.add(f);
             }
         }
-        return result;
     }
 }

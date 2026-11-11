@@ -29,8 +29,7 @@ public class ImpactAnalyzer {
         for (SchemaChange change : changes) {
             if (change.getChangeType() == ChangeType.ADD_COLUMN) continue;
 
-            List<Node> startNodes = resolveStartNodes(change);
-            for (Node start : startNodes) {
+            for (Node start : sortedDistinct(resolveStartNodes(change))) {
                 result.addAll(bfs(start, change));
             }
         }
@@ -100,8 +99,11 @@ public class ImpactAnalyzer {
                 continue;
             }
 
-            for (Edge edge : graph.incomingEdgesOf(current)) {
-                Node neighbor = graph.getEdgeSource(edge);
+            // 엣지 삽입 순서가 아니라 노드 id 순으로 방문해야 같은 거리의 경로 중 항상 같은 것이 남는다.
+            List<Node> neighbors = new ArrayList<>();
+            for (Edge edge : graph.incomingEdgesOf(current)) neighbors.add(graph.getEdgeSource(edge));
+            neighbors.sort(BY_ID);
+            for (Node neighbor : neighbors) {
                 if (!visited.contains(neighbor)) {
                     visited.add(neighbor);
                     parent.put(neighbor, current);
@@ -151,12 +153,38 @@ public class ImpactAnalyzer {
     }
 
 
+    private static final Comparator<Node> BY_ID = Comparator.comparing(Node::getId);
+
+    /** 시작 노드를 중복 제거하고 id 순으로 정렬한다 (nodeIndex/엣지 순회 순서에 의존하지 않도록). */
+    private static List<Node> sortedDistinct(List<Node> nodes) {
+        Map<String, Node> byId = new TreeMap<>();
+        for (Node n : nodes) byId.putIfAbsent(n.getId(), n);
+        return new ArrayList<>(byId.values());
+    }
+
+    /** 경로 비교: 짧은 경로 우선, 길이가 같으면 노드 id 사전순. */
+    private static final Comparator<AffectedApi> BETTER_PATH =
+            Comparator.<AffectedApi>comparingInt(a -> a.getImpactNodes().size())
+                    .thenComparing(a -> String.join(">", a.getImpactPath()));
+
+    /** 리포트 순서: 위험도(HIGH 먼저) → API → 원인. */
+    private static final Comparator<AffectedApi> REPORT_ORDER =
+            Comparator.<AffectedApi, RiskLevel>comparing(AffectedApi::getRiskLevel)
+                    .thenComparing(AffectedApi::getApiId)
+                    .thenComparing(a -> a.getCause().toString());
+
+    /**
+     * 같은 (API, 원인) 쌍이 여러 시작 노드에서 발견되면 하나만 남긴다.
+     * "처음 들어온 것"이 아니라 정해진 규칙(BETTER_PATH)으로 골라서 입력 순서와 무관하게 만든다.
+     */
     private List<AffectedApi> deduplicate(List<AffectedApi> list) {
-        Map<String, AffectedApi> seen = new LinkedHashMap<>();
+        Map<String, AffectedApi> best = new HashMap<>();
         for (AffectedApi api : list) {
             String key = api.getApiId() + "|" + api.getCause().toString();
-            seen.putIfAbsent(key, api);
+            best.merge(key, api, (a, b) -> BETTER_PATH.compare(a, b) <= 0 ? a : b);
         }
-        return new ArrayList<>(seen.values());
+        List<AffectedApi> result = new ArrayList<>(best.values());
+        result.sort(REPORT_ORDER);
+        return result;
     }
 }

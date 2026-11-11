@@ -50,6 +50,12 @@ java {
 
 tasks.named('test') {
     useJUnitPlatform()
+    // 스냅샷 정답 파일 재생성: ./gradlew test --tests '*DeterminismTest*' -PupdateSnapshots=true
+    systemProperty 'schemaguard.updateSnapshots', project.findProperty('updateSnapshots') ?: 'false'
+    // 시스템 프로퍼티는 입력으로 취급되지 않으므로, 재생성 요청 시 up-to-date 로 건너뛰지 않게 한다.
+    if (project.hasProperty('updateSnapshots')) {
+        outputs.upToDateWhen { false }
+    }
 }
 
 // Java 소스 파싱 벤치마크 (legacy: 파서별 파싱 vs shared: 파일당 1회 파싱)

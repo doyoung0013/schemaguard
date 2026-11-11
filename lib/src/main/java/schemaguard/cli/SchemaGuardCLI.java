@@ -11,6 +11,7 @@ import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
 
 import java.io.File;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Callable;
@@ -110,7 +111,7 @@ public class SchemaGuardCLI implements Callable<Integer> {
 
         // 파일당 한 번 파싱한 AST를 네 추출기가 공유한다.
         SourceScanner.Result scan = new SourceScanner().scan(javaFiles);
-        sourceParseFailures.addAll(scan.failedFiles());
+        sourceParseFailures.addAll(relativeToSource(scan.failedFiles()));
         long t2 = System.nanoTime();
 
         System.out.println("  Entities    : " + scan.entities().size() + " fields");
@@ -136,6 +137,19 @@ public class SchemaGuardCLI implements Callable<Integer> {
                     ms(t1 - t0), ms(t2 - t1), scan.parseCalls(), ms(t3 - t2), ms(t4 - t3));
         }
         return result;
+    }
+
+    /** 리포트에 남는 경로를 --source 기준 상대경로 + '/' 구분자로 통일한다 (OS 간 같은 리포트). */
+    private List<String> relativeToSource(List<String> paths) {
+        Path root = Path.of(sourcePath).toAbsolutePath().normalize();
+        List<String> out = new ArrayList<>();
+        for (String p : paths) {
+            Path abs = Path.of(p).toAbsolutePath().normalize();
+            Path rel = abs.startsWith(root) ? root.relativize(abs) : abs;
+            out.add(rel.toString().replace('\\', '/'));
+        }
+        out.sort(null);
+        return out;
     }
 
     private static double ms(long nanos) {

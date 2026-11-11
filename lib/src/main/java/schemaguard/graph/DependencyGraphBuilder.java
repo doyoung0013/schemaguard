@@ -200,14 +200,42 @@ public class DependencyGraphBuilder {
 
     // ── 그래프 유틸 ──────────────────────────────────────────────────────────
 
+    /**
+     * 노드를 만들거나 기존 노드를 돌려준다.
+     *
+     * 같은 노드가 여러 곳에서 언급된다. 예) svc:B.m 은 B 자신의 정의(파일+라인)로도,
+     * A 의 호출 지점(파일 없음, 호출 라인)으로도 만들어질 수 있다. 예전에는 먼저 만든 쪽이 이겨서
+     * 파일 처리 순서에 따라 위치가 달라졌다. 이제는 순서와 무관하게
+     *   1) 파일 경로가 있는 위치가 없는 위치보다 우선하고
+     *   2) 둘 다 있으면 (경로, 라인)이 작은 쪽을 남긴다.
+     */
     private Node getOrCreate(String id, NodeType type, String name,
                               String rawFilePath, int lineNumber) {
-        return nodeIndex.computeIfAbsent(id, k -> {
-            String relativePath = toRelativePath(rawFilePath);
+        String relativePath = toRelativePath(rawFilePath);
+        Node existing = nodeIndex.get(id);
+        if (existing == null) {
             Node n = new Node(id, type, name, relativePath, lineNumber);
             graph.addVertex(n);
+            nodeIndex.put(id, n);
             return n;
-        });
+        }
+        if (prefersLocation(relativePath, lineNumber, existing.getFilePath(), existing.getLineNumber())) {
+            existing.setFilePath(relativePath);
+            existing.setLineNumber(lineNumber);
+        }
+        return existing;
+    }
+
+    /** 위치의 전순서: 경로 있음 &lt; 경로 없음, 경로 사전순, 유효 라인(&gt;0) 작은 순, 라인 없음(-1)은 맨 뒤. */
+    private static boolean prefersLocation(String newPath, int newLine, String oldPath, int oldLine) {
+        if ((newPath == null) != (oldPath == null)) return newPath != null;
+        if (newPath != null) {
+            int c = newPath.compareTo(oldPath);
+            if (c != 0) return c < 0;
+        }
+        int n = newLine > 0 ? newLine : Integer.MAX_VALUE;
+        int o = oldLine > 0 ? oldLine : Integer.MAX_VALUE;
+        return n < o;
     }
 
     private void addEdge(Node from, Node to, RelationType relation) {

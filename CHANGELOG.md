@@ -15,6 +15,60 @@
 
 ---
 
+## 8. 같은 입력이면 같은 결과 (결정성)
+
+**문제**
+
+같은 커밋을 Windows 로컬과 Ubuntu CI에서 분석하면 리포트가 달라질 수 있었습니다. 영향받는 API 집합은 같지만, 표시되는 영향 경로와 순서, 파일 위치가 달라졌습니다. 원인은 네 가지입니다.
+
+1. `File.listFiles()`의 순서는 OS와 파일시스템에 따라 다릅니다. NTFS는 대체로 이름순이고, ext4는 해시 순서입니다. 파일 순서가 그래프에 노드와 엣지가 들어가는 순서를 정하고, 이 순서가 BFS가 이웃을 방문하는 순서를 정합니다.
+2. `deduplicate`는 같은 (API, 원인) 쌍이 여러 개면 **처음 들어온** 경로를 남겼습니다. 리포트 순서도 SQL 순서와 탐색 순서를 따랐습니다.
+3. 그래프 노드의 위치(파일, 라인)는 그 노드를 **처음 만든 쪽**의 값으로 정해졌습니다. 예를 들어 `svc:B.m`을 A의 호출 지점이 먼저 만들면 파일 경로가 없고 A의 호출 라인이 남았습니다. B의 정의가 먼저 처리되면 B의 파일과 라인이 남았습니다.
+4. JSON의 줄바꿈은 OS 기본값(Windows CRLF, Linux LF)이었습니다. 소스 파싱 실패 경로는 `javaFile.getPath()` 그대로라 구분자가 `\`일 수도 `/`일 수도 있었습니다.
+
+`HashMap`(`nodeIndex`) 자체는 큰 원인이 아닙니다. `String.hashCode()`는 명세로 고정되어 있어, 넣는 순서가 같으면 순회 순서도 같습니다. 그래도 아래 2번의 정렬로 이 의존도 함께 끊었습니다.
+
+**변경**
+
+1. `SourceScanner.collectJavaFiles`가 경로(`/` 정규화) 기준으로 정렬된 목록을 돌려줍니다.
+2. `ImpactAnalyzer`
+   - 시작 노드를 중복 제거한 뒤 노드 id 순으로 탐색합니다.
+   - BFS가 이웃을 노드 id 순으로 방문합니다.
+   - 같은 (API, 원인) 쌍이 여러 개면 **짧은 경로**를 남기고, 길이가 같으면 경로의 노드 id 사전순으로 정합니다.
+   - 결과를 위험도(HIGH 먼저), API, 원인 순으로 정렬합니다.
+3. `DependencyGraphBuilder.getOrCreate`의 위치 선택 규칙을 바꿨습니다. 순서와 무관하게 파일 경로가 있는 위치가 없는 위치보다 우선합니다. 둘 다 있으면 (경로, 라인)이 작은 쪽을 남깁니다.
+4. JSON 리포트
+   - 줄바꿈을 LF로 고정했습니다.
+   - `parse.sourceParseFailures`를 `--source` 기준 상대경로와 `/` 구분자로 바꾸고 정렬했습니다.
+   - `.gitattributes`에서 스냅샷 정답 파일을 LF로 고정했습니다.
+
+**테스트** (`DeterminismTest`, 4개)
+
+| 테스트 | 내용 |
+|---|---|
+| `reportMatchesSnapshot` | 샘플 프로젝트(엔티티 2, 서비스 3, 컨트롤러 3, 파싱 실패 파일 1)와 마이그레이션 4구문으로 만든 JSON 리포트를 `lib/src/test/resources/snapshots/determinism-report.json`과 바이트 단위로 비교합니다. `GET /admin/users`처럼 같은 API에 닿는 경로가 여러 개인 구조를 일부러 넣었습니다. |
+| `repeatedRunsProduceIdenticalReports` | CLI를 3번 실행해 리포트가 같은지 확인합니다. |
+| `javaFileOrderDoesNotChangeReport` | Java 파일 입력 순서를 섞어(시드 20개 + 역순) 리포트가 같은지 확인합니다. OS마다 다른 `listFiles` 순서를 흉내 냅니다. |
+| `collectJavaFilesReturnsPathSortedList` | 파일 목록이 정렬되어 나오는지 확인합니다. |
+
+결과를 의도적으로 바꿨다면 아래 명령으로 정답 파일을 다시 만들고 diff를 검토한 뒤 커밋합니다.
+
+```
+./gradlew test --tests '*DeterminismTest*' -PupdateSnapshots=true
+```
+
+**검증**
+
+- 이전 main 코드에 새 테스트를 돌리면 `reportMatchesSnapshot`과 `javaFileOrderDoesNotChangeReport`가 실패하고, 새 코드에서는 통과합니다. `collectJavaFilesReturnsPathSortedList`는 이전 코드에서도 통과했는데, Windows NTFS가 원래 이름순으로 돌려주기 때문입니다. Linux에서는 이 보장이 없습니다.
+- 전체 테스트: 30개 모두 통과.
+- community 마이그레이션 18개로 전후를 비교했습니다.
+  - 종료 코드와 summary, (API, 위험도, 원인) 160건이 모두 같습니다.
+  - 영향 경로가 바뀐 54건 중 5건은 더 짧아졌고, 49건은 길이가 같은 경로 중 id 순으로 정해진 쪽으로 바뀌었습니다. 더 길어진 것은 없습니다.
+  - 이전 리포트는 Windows에서 CRLF였고, 새 리포트는 LF입니다.
+- 같은 OS에서 두 번 실행한 결과는 이전 코드도 바이트 단위로 같았습니다. 이번 변경이 고정하는 것은 OS나 파일시스템, 입력 순서가 달라질 때의 차이입니다.
+
+---
+
 ## 7. 실제 프로젝트(community) 검증에서 찾은 누락 2건 수정
 
 `community` Spring Boot 프로젝트에 태그·신고·알림·북마크 기능(Java 파일 25개)과 마이그레이션 V12~V17을 더 붙인 뒤, 마이그레이션 18개를 SchemaGuard로 돌려 결과를 사람이 읽어 보며 찾은 누락입니다. 이 기능은 `community` 저장소의 `test/schemaguard-complex` 브랜치에만 있습니다.

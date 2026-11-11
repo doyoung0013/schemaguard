@@ -1,7 +1,9 @@
 package schemaguard.report;
 
+import com.fasterxml.jackson.core.util.DefaultIndenter;
+import com.fasterxml.jackson.core.util.DefaultPrettyPrinter;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.databind.ObjectWriter;
 import schemaguard.model.*;
 import schemaguard.parser.MigrationParser;
 
@@ -13,7 +15,7 @@ import java.util.*;
 public class JsonReporter implements ReportGenerator {
 
     private final String outputPath;
-    private final ObjectMapper mapper;
+    private final ObjectWriter writer;
     private final MigrationParser.ParseResult parse;      // null이면 parse 섹션 생략
     private final List<String> sourceParseFailures;
 
@@ -25,7 +27,11 @@ public class JsonReporter implements ReportGenerator {
                         MigrationParser.ParseResult parse,
                         List<String> sourceParseFailures) {
         this.outputPath          = outputPath;
-        this.mapper              = new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
+        // 기본 pretty printer는 OS 줄바꿈(Windows CRLF, Linux LF)을 쓴다.
+        // 같은 입력이면 OS와 무관하게 같은 바이트가 나오도록 LF로 고정한다.
+        DefaultPrettyPrinter printer = new DefaultPrettyPrinter()
+                .withObjectIndenter(new DefaultIndenter("  ", "\n"));
+        this.writer              = new ObjectMapper().writer(printer);
         this.parse               = parse;
         this.sourceParseFailures = sourceParseFailures != null ? sourceParseFailures : List.of();
     }
@@ -85,7 +91,7 @@ public class JsonReporter implements ReportGenerator {
             if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
                 throw new IOException("cannot create directory " + parent);
             }
-            mapper.writeValue(out, root);
+            writer.writeValue(out, root);
             System.out.println("JSON report saved to: " + outputPath);
 
         } catch (IOException e) {
