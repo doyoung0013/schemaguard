@@ -35,6 +35,10 @@ public class DependencyGraphBuilder {
      */
     private final Map<String, List<Node>> writeMethodsByTable = new HashMap<>();
 
+    /** 연관 접근 해석 결과 집계 (linked-declared / linked-inferred / linked-solver / linked-name / name-ambiguous / root-not-entity / not-association) */
+    private final Map<String, Integer> resolution = new java.util.TreeMap<>();
+    public Map<String, Integer> getAssociationResolution() { return resolution; }
+
     /** static 메서드를 가진 DTO·매퍼 클래스명 (ServiceInfo.isHelper) */
     private final Set<String> helperClasses = new java.util.HashSet<>();
 
@@ -243,6 +247,9 @@ public class DependencyGraphBuilder {
         // 매핑 정보가 있는 엔티티만 대상 (외부 라이브러리 타입 등은 제외)
         java.util.function.Predicate<String> known = e -> fieldsByEntity.containsKey(e) || ownFkByEntity.containsKey(e);
 
+        Map<String, String> entityOfRepo = new HashMap<>();
+        for (RepositoryInfo r : repos) entityOfRepo.putIfAbsent(r.getClassName(), r.getEntityClass());
+
         // EAGER: 소유 엔티티를 로딩하는 모든 곳에서 연관 엔티티도 로딩된다.
         Map<String, List<RepositoryInfo>> reposByEntity = new HashMap<>();
         for (RepositoryInfo r : repos) reposByEntity.computeIfAbsent(r.getEntityClass(), k -> new ArrayList<>()).add(r);
@@ -270,15 +277,40 @@ public class DependencyGraphBuilder {
             }
         }
 
-        // 서비스·DTO 의 지연 로딩 초기화: 같은 이름의 FK 필드가 모두 같은 엔티티를 가리킬 때만 연결한다.
+        // 서비스·DTO 의 지연 로딩 초기화.
+        //   루트 타입을 알면(선언/symbol solver) FK 매핑을 따라 경로를 정확히 해석한다. 루트가 엔티티가 아니면 연관이 아니다.
+        //   루트 타입을 모르면 첫 속성 이름으로 추정한다: 같은 이름의 FK 필드가 모두 같은 엔티티를 가리킬 때만.
         for (ServiceInfo svc : services) {
             for (ServiceInfo.AssociationAccess a : svc.getAssociationAccesses()) {
-                List<FkMapping> candidates = fkByField.getOrDefault(a.attribute(), List.of());
-                Set<String> refs = new java.util.TreeSet<>();
-                candidates.forEach(fk -> refs.add(fk.getReferencedEntity()));
-                if (refs.size() != 1 || !known.test(refs.iterator().next())) continue;
-                addEdge(methodNode(svc, a.callerMethod(), a.callerLine()),
-                        load.apply(refs.iterator().next()), RelationType.LOADS);
+                String owner = a.rootType();
+                List<String> path = a.path();
+                String how = a.typeSource().name().toLowerCase();
+                if (owner != null && owner.startsWith("repo:")) {
+                    // 리포지토리 호출 결과 → 그 엔티티. 리포지토리가 아닌 필드의 호출이면 타입을 모르는 것으로 보고 이름 추정.
+                    owner = entityOfRepo.get(owner.substring(5));
+                }
+                if (owner == null) {
+                    Set<String> refs = new java.util.TreeSet<>();
+                    fkByField.getOrDefault(path.get(0), List.of()).forEach(fk -> refs.add(fk.getReferencedEntity()));
+                    if (refs.size() != 1) {
+                        resolution.merge(refs.isEmpty() ? "not-association" : "name-ambiguous", 1, Integer::sum);
+                        continue;
+                    }
+                    owner = refs.iterator().next();
+                    path = path.subList(1, path.size());
+                    how = "name";
+                } else if (!known.test(owner)) {
+                    resolution.merge("root-not-entity", 1, Integer::sum);
+                    continue;
+                }
+                for (String attr : path) {
+                    FkMapping fk = fkByOwnerAndField.get(owner + "#" + attr);
+                    if (fk == null) { owner = null; break; }   // 연관이 아닌 getter (예: getTitle)
+                    owner = fk.getReferencedEntity();
+                }
+                if (owner == null || !known.test(owner)) { resolution.merge("not-association", 1, Integer::sum); continue; }
+                resolution.merge("linked-" + how, 1, Integer::sum);
+                addEdge(methodNode(svc, a.callerMethod(), a.callerLine()), load.apply(owner), RelationType.LOADS);
             }
             // 엔티티 타입 파라미터의 getter: AuthorDto.from(User user) { user.getNickname() } → User 초기화
             for (ServiceInfo.EntityTypeAccess a : svc.getEntityTypeAccesses()) {

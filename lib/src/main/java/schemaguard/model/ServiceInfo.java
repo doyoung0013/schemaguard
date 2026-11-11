@@ -77,10 +77,35 @@ public class ServiceInfo {
      * (getId()만 꺼내는 경우는 프록시가 id를 갖고 있어 로딩되지 않으므로 기록하지 않는다.)
      */
     public void addAssociationAccess(String callerMethod, int callerLine, String attribute, int line) {
-        associationAccesses.add(new AssociationAccess(callerMethod, callerLine, attribute, line));
+        addAssociationAccess(callerMethod, callerLine, null, List.of(attribute), TypeSource.NAME, line);
     }
 
-    public record AssociationAccess(String callerMethod, int callerLine, String attribute, int line) {}
+    /**
+     * @param rootType   getter 체인이 시작하는 변수의 타입 (모르면 null → 첫 속성 이름으로 추정)
+     * @param path       루트에서 초기화되는 연관까지의 getter 속성들. 예) report.getPost().getAuthor().getNickname()
+     *                   → [post] 와 [post, author] 두 건으로 기록된다.
+     * @param typeSource rootType 을 알아낸 방법
+     */
+    public void addAssociationAccess(String callerMethod, int callerLine, String rootType,
+                                     List<String> path, TypeSource typeSource, int line) {
+        associationAccesses.add(new AssociationAccess(callerMethod, callerLine, rootType, List.copyOf(path), typeSource, line));
+    }
+
+    /**
+     * 루트 타입을 알아낸 방법
+     *   DECLARED : 파라미터·지역 변수·명시 타입 람다·필드의 선언 타입
+     *   INFERRED : 컬렉션/Optional 원소 타입, 리포지토리 호출 결과 (posts.stream().map(p -> …), repo.findById(id).orElseThrow())
+     *   SOLVER   : JavaParser symbol solver (옵션)
+     *   NAME     : 알 수 없음 → 첫 속성 이름으로 추정
+     * INFERRED 의 리포지토리 결과는 rootType 이 "repo:XRepository" 형태이고, 그래프 빌더가 엔티티로 바꾼다.
+     */
+    public enum TypeSource { DECLARED, INFERRED, SOLVER, NAME }
+
+    public record AssociationAccess(String callerMethod, int callerLine, String rootType,
+                                    List<String> path, TypeSource typeSource, int line) {
+        /** 초기화되는 연관 속성 (경로의 마지막) */
+        public String attribute() { return path.get(path.size() - 1); }
+    }
 
     // ── 내부 레코드 ───────────────────────────────────────────────────────────
 

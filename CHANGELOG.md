@@ -15,6 +15,84 @@
 
 ---
 
+## 14. 연관 접근을 이름 추정에서 루트 타입 해석으로
+
+11번과 13번의 연관 초기화 추적은 `x.getPost()`의 **속성 이름 `post`만 보고** 어느 엔티티인지 추정했습니다. 이 방식에는 세 가지 구멍이 있습니다.
+
+| 구멍 | 예 | 결과 |
+|---|---|---|
+| 같은 이름의 연관이 서로 다른 엔티티를 가리킴 | `Pet.owner → User`, `Shop.owner → Company` | 어느 쪽인지 몰라서 **연결하지 않음 (놓침)** |
+| 지역 변수에 연관을 꺼낸 뒤 접근 | `Pet p = visit.getPet(); p.getOwner().getName()` | 체인이 끊겨 놓침 |
+| 다단계 체인의 중간 단계 | `report.getPost().getAuthor()` | `author`를 "Post의 author"가 아니라 이름으로 따로 추정 |
+
+### 방법
+
+getter 체인을 **루트(체인이 시작하는 변수나 식)부터** 해석합니다. 루트 타입을 아래 순서로 찾은 뒤, FK 매핑을 따라 한 단계씩 정확히 따라갑니다(`Report.post → Post`, `Post.author → User`).
+
+| 순서 | 방법 | 대상 |
+|---|---|---|
+| 1 | **선언 타입** (`DECLARED`) | 명시 타입 람다 파라미터, 지역 변수(`var` 제외), 메서드 파라미터, 필드 |
+| 2 | **가벼운 추론** (`INFERRED`) | 타입을 생략한 람다의 원소 타입: `List<Post> posts` → `posts.stream().filter(…).map(p -> …)`<br>리포지토리 호출 결과: `postTagRepository.findByPostId(id).stream().map(pt -> …)`, `visitRepository.findById(id).orElseThrow().getPet()` |
+| 3 | **symbol solver** (`SOLVER`, 옵션 `--symbol-solver`) | 위 규칙으로 모르는 루트. JavaParser symbol solver에 JDK와 프로젝트 소스를 붙여 해석 |
+| 4 | **이름 추정** (`NAME`) | 그래도 모르면 기존 방식(같은 이름의 FK가 모두 같은 엔티티를 가리킬 때만) |
+
+**추가로 바뀐 규칙**
+- 루트 타입이 **엔티티가 아니면**(DTO 등) 연관으로 보지 않습니다. 이름 추정이었다면 `view.getOwner()`를 `Pet.owner`나 `Shop.owner`로 오인할 수 있습니다.
+- 엔티티 타입 지역 변수의 getter도 초기화로 봅니다(13번의 "엔티티 파라미터" 규칙 확장). `Pet p = v.getPet(); p.getOwner()`가 그 예입니다.
+- 리포지토리 호출 결과는 `repo:<필드 타입>`으로 넘기고, 그래프 빌더가 **실제 리포지토리 목록**으로 엔티티를 찾습니다. 이름 접미사 `Repository`에 기대지 않습니다. 리포지토리가 아니면 이름 추정으로 넘어갑니다.
+- 해석 결과를 `--timing`에 표시합니다. 예: `Association chain roots: declared 139 | inferred 22 | … ; links {linked-declared=12, linked-inferred=4, …}`
+
+### 결과
+
+**community (Java 파일 65개):**
+- 연관을 초기화하는 체인 중 그래프에 연결된 16건이 모두 타입으로 해석됐습니다(선언 12, 추론 4). 이전에 이름으로 추정하던 4건(`PostService.getPosts`의 람다 2건, `TagService`의 리포지토리 스트림 2건)이 추론으로 바뀌었습니다.
+- 리포트 18개는 13번 빌드와 **바이트 단위까지 같습니다.** 이 프로젝트에서는 이름 추정이 틀린 적이 없었습니다.
+- 실제 MySQL 측정 대비 지표도 그대로입니다(재현율 100%, HIGH 정밀도 97.1%).
+
+**community를 5,000개 규모로 키운 프로젝트 (4,977개):** community를 79벌 복제해 클래스 이름에 접미사를 붙인 프로젝트라, `post`나 `author` 같은 속성 이름이 79개의 서로 다른 엔티티를 가리킵니다.
+
+| | 이름 추정 (13번) | 루트 타입 해석 (기본) | + `--symbol-solver` |
+|---|---|---|---|
+| 연결된 연관 접근 | 이름이 겹쳐 대부분 포기 | 선언 790 + 추론 316 | 같음 |
+| 이름이 모호해 포기 | 다수 | **0** | 0 |
+| 파싱 시간 | | 4.5~5.1초 | 11.5~11.8초 (**약 2.4배**) |
+| 리포트 | | | 기본과 **바이트 단위로 같음** |
+
+13번 빌드(`07770c6`)와 V3(`posts.title` 이름 변경)으로 비교하면 영향 API가 13개에서 15개로 늘었습니다.
+- `POST /api/admin/reports/{reportId}/accept`: `ReportService.process`의 `report.getPost().getTitle()`이 `post` 이름 충돌로 버려졌다가, `report`의 선언 타입(Report)으로 정확히 연결됐습니다. **실제 MySQL에서 실패하는 API입니다**(9번 측정).
+- `POST …/reject`: 같은 메서드를 쓰는 거절 분기입니다. 11번에서 설명한 분기 한계의 오탐입니다.
+
+### symbol solver를 기본으로 켜지 않은 이유
+
+- community에서 solver는 추가로 연결한 연관이 **0건**이었고, 파싱 시간은 약 2배가 됐습니다(약 400ms → 750~1,100ms).
+- 이유는 두 가지입니다.
+  1. 타입을 생략한 람다 파라미터를 풀려면 solver가 **람다 본문의 getter 반환 타입까지** 추론해야 합니다. 그런데 Lombok `@Getter`가 만드는 getter는 소스에 없습니다.
+  2. `JpaRepository` 같은 Spring 타입도 클래스패스에 없습니다.
+- 그래서 실제로 자주 쓰는 패턴(컬렉션 원소, 리포지토리 호출 결과)은 직접 만든 추론 규칙으로 처리하고, solver는 getter가 소스에 있는 프로젝트를 위한 옵션으로 남겼습니다.
+- solver가 규칙보다 나은 사례는 테스트로 고정했습니다. 같은 클래스의 메서드가 돌려주는 `List<Pet>`의 원소 같은 경우입니다.
+
+### 함께 고친 버그
+
+- **문법 오류 파일이 실패로 보고되지 않던 문제:** `SourceScanner`가 `StaticJavaParser` 대신 스캔마다 `JavaParser` 인스턴스를 쓰도록 바꾸면서 생긴 문제입니다. 인스턴스는 문법 오류에도 예외 없이 부분 결과를 돌려줍니다. `isSuccessful()`을 확인해 실패로 보고하게 했습니다. 기존 `SourceScannerTest`와 결정성 스냅샷(파싱 실패 파일 포함)이 이 문제를 잡아 줬습니다.
+- **symbol solver가 람다 파라미터를 `? super Pet` 같은 제약 타입으로 돌려줌:** 이 경우 경계 타입(`Pet`)으로 풀어서 씁니다.
+
+### 테스트
+
+- 신규 `TypedAssociationTest` 5개
+  - 같은 이름 `owner`가 두 엔티티를 가리키는 프로젝트에서 각 테이블 변경이 맞는 API에만 닿는지: 파라미터, 지역 변수, 컬렉션 원소, 리포지토리 스트림, 리포지토리 호출 루트
+  - DTO 루트는 연관이 아님
+  - 파서가 기록하는 루트 타입과 해석 방법
+  - 엔티티 타입 지역 변수
+  - solver 옵션이 규칙으로 모르는 루트를 해석하는지: solver가 없으면 놓치고, 있으면 찾음
+- 전체 68개 통과
+
+### 한계
+
+- 추론 규칙은 자주 쓰는 형태만 다룹니다. 스트림 원소 연산(`map`, `filter`, `forEach` 등)과 Optional 꺼내기(`orElseThrow` 등)입니다. `Collectors.groupingBy` 이후의 원소나 사용자 정의 메서드가 돌려주는 컬렉션은 solver 옵션이나 이름 추정에 맡깁니다.
+- 지역 변수 타입은 메서드 안에서 이름이 같은 첫 선언을 씁니다. 블록마다 같은 이름을 다른 타입으로 다시 선언하는 코드는 틀릴 수 있습니다.
+
+---
+
 ## 13. DTO·매퍼 static 메서드에서의 연관 로딩 추적
 
 11번에서는 연관 초기화(`x.getPost().getTitle()`)를 `@Service` 클래스 안에서만 찾았습니다. 그런데 실제 코드에서는 이 접근이 **DTO의 static 팩토리 메서드**에 있는 경우가 많습니다.

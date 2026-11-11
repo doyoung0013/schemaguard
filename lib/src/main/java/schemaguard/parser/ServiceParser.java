@@ -13,6 +13,14 @@ import java.util.*;
 
 public class ServiceParser {
 
+    /** 연관 접근의 루트 타입을 어떤 방법으로 알아냈는지 누적한다. */
+    private final AccessCollector.TypeStats stats = new AccessCollector.TypeStats();
+
+    /** {declared, inferred, solver, unresolved} */
+    public int[] typeResolutionCounts() {
+        return new int[]{stats.declared, stats.inferred, stats.solver, stats.unresolved};
+    }
+
     public List<ServiceInfo> parse(File javaFile) throws Exception {
         return extract(StaticJavaParser.parse(javaFile), javaFile.getAbsolutePath());
     }
@@ -46,10 +54,12 @@ public class ServiceParser {
 
                 // 연관 초기화: x.getPost().getTitle() 처럼 getter 결과에 다시 getId() 가 아닌 호출을 하면
                 // 지연 로딩 프록시가 초기화되어 연관 엔티티의 컬럼을 전부 SELECT 한다.
-                AccessCollector.getterChains(method, (attr, line) ->
-                        info.addAssociationAccess(callerMethod, methodLine, attr, line));
-                AccessCollector.entityParameterAccesses(method, (type, line) ->
-                        info.addEntityTypeAccess(callerMethod, methodLine, type, line));
+                // getter 체인을 루트 변수의 타입부터 해석한다 (선언 → symbol solver → 이름 추정).
+                AccessCollector.associationChains(method,
+                        (rootType, path, source, line) ->
+                                info.addAssociationAccess(callerMethod, methodLine, rootType, path, source, line),
+                        (type, line) -> info.addEntityTypeAccess(callerMethod, methodLine, type, line),
+                        stats);
                 AccessCollector.staticCalls(method, (type, name, line) -> {
                     if (!type.equals(clazz.getNameAsString()) || !name.equals(callerMethod))
                         info.addStaticCall(callerMethod, methodLine, type, name, line);

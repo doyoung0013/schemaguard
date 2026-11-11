@@ -58,6 +58,11 @@ public class SchemaGuardCLI implements Callable<Integer> {
     @Option(names = "--timing", description = "구간별 소요 시간(파일 수집/파싱/그래프/분석) 출력")
     private boolean timing;
 
+    @Option(names = "--symbol-solver",
+            description = "선언·추론으로 타입을 모르는 getter 체인 루트를 JavaParser symbol solver 로 한 번 더 해석한다. "
+                    + "Lombok·Spring 이 클래스패스에 없어 실패하는 경우가 많고 파싱이 느려져 기본은 끈다.")
+    private boolean symbolSolver;
+
     @Override
     public Integer call() {
         try {
@@ -116,7 +121,8 @@ public class SchemaGuardCLI implements Callable<Integer> {
         System.out.println("Scanning " + javaFiles.size() + " Java source files...");
 
         // 파일당 한 번 파싱한 AST를 네 추출기가 공유한다.
-        SourceScanner.Result scan = new SourceScanner().scan(javaFiles);
+        SourceScanner scanner = new SourceScanner();
+        SourceScanner.Result scan = scanner.scan(javaFiles, symbolSolver ? new File(sourcePath) : null);
         sourceParseFailures.addAll(relativeToSource(scan.failedFiles()));
         long t2 = System.nanoTime();
 
@@ -142,8 +148,11 @@ public class SchemaGuardCLI implements Callable<Integer> {
         long t4 = System.nanoTime();
 
         if (timing) {
-            System.out.printf("Timing (ms): collect %.1f | parse %.1f (%d parse calls) | graph %.1f | analyze %.1f%n%n",
+            System.out.printf("Timing (ms): collect %.1f | parse %.1f (%d parse calls) | graph %.1f | analyze %.1f%n",
                     ms(t1 - t0), ms(t2 - t1), scan.parseCalls(), ms(t3 - t2), ms(t4 - t3));
+            int[] tr = scanner.typeResolutionCounts();
+            System.out.printf("Association chain roots: declared %d | inferred %d | symbol solver %d | unresolved %d; links %s%n%n",
+                    tr[0], tr[1], tr[2], tr[3], builder.getAssociationResolution());
         }
         return result;
     }

@@ -1,7 +1,13 @@
 package schemaguard.parser;
 
+import com.github.javaparser.JavaParser;
+import com.github.javaparser.ParserConfiguration;
 import com.github.javaparser.StaticJavaParser;
 import com.github.javaparser.ast.CompilationUnit;
+import com.github.javaparser.symbolsolver.JavaSymbolSolver;
+import com.github.javaparser.symbolsolver.resolution.typesolvers.CombinedTypeSolver;
+import com.github.javaparser.symbolsolver.resolution.typesolvers.JavaParserTypeSolver;
+import com.github.javaparser.symbolsolver.resolution.typesolvers.ReflectionTypeSolver;
 import schemaguard.model.ControllerInfo;
 import schemaguard.model.EntityMapping;
 import schemaguard.model.FkMapping;
@@ -36,6 +42,17 @@ public class SourceScanner {
     private final ControllerParser controllerParser = new ControllerParser();
 
     public Result scan(List<File> javaFiles) {
+        return scan(javaFiles, null);
+    }
+
+    /**
+     * @param sourceRoot 패키지 디렉터리의 루트(src/main/java). 주어지면 symbol solver 를 붙여,
+     *                   선언으로 타입을 알 수 없는 getter 체인 루트(타입 생략 람다 파라미터 등)의 타입을 해석한다.
+     *                   타입 해석은 체인 루트에만 필요할 때 시도하고, 실패하면 이름 추정으로 넘어간다.
+     *                   null 이면 symbol solver 없이 파싱한다.
+     */
+    public Result scan(List<File> javaFiles, File sourceRoot) {
+        JavaParser parser = newParser(sourceRoot);
         List<EntityMapping> entities = new ArrayList<>();
         List<FkMapping> fkMappings = new ArrayList<>();
         List<RepositoryInfo> repos = new ArrayList<>();
@@ -47,7 +64,11 @@ public class SourceScanner {
         for (File javaFile : javaFiles) {
             try {
                 parseCalls++;
-                CompilationUnit cu = StaticJavaParser.parse(javaFile);
+                // JavaParser 인스턴스는 문법 오류에도 예외 없이 부분 결과를 돌려준다. 실패는 실패로 보고한다.
+                com.github.javaparser.ParseResult<CompilationUnit> parsed = parser.parse(javaFile);
+                if (!parsed.isSuccessful() || parsed.getResult().isEmpty())
+                    throw new com.github.javaparser.ParseProblemException(parsed.getProblems());
+                CompilationUnit cu = parsed.getResult().get();
                 String path = javaFile.getAbsolutePath();
 
                 EntityParser.ParseResult pr = entityParser.parse(cu, path);
@@ -65,6 +86,30 @@ public class SourceScanner {
         }
 
         return new Result(entities, fkMappings, repos, services, controllers, failed, parseCalls);
+    }
+
+    /** getter 체인 루트 타입 해석 건수 {선언, 추론, symbol solver, 해석 실패} */
+    public int[] typeResolutionCounts() { return serviceParser.typeResolutionCounts(); }
+
+    private static JavaParser newParser(File sourceRoot) {
+        ParserConfiguration base = StaticJavaParser.getParserConfiguration();
+        ParserConfiguration cfg = new ParserConfiguration().setLanguageLevel(base.getLanguageLevel());
+        File root = packageRoot(sourceRoot);
+        if (root != null) {
+            ParserConfiguration plain = new ParserConfiguration().setLanguageLevel(base.getLanguageLevel());
+            CombinedTypeSolver types = new CombinedTypeSolver(
+                    new ReflectionTypeSolver(),                     // JDK (List, Optional, Stream ...)
+                    new JavaParserTypeSolver(root, plain));          // 프로젝트 소스. Spring 등 외부 라이브러리는 없다.
+            cfg.setSymbolResolver(new JavaSymbolSolver(types));
+        }
+        return new JavaParser(cfg);
+    }
+
+    /** --source 로 프로젝트 루트를 줬으면 src/main/java 를 쓴다. */
+    private static File packageRoot(File sourceRoot) {
+        if (sourceRoot == null || !sourceRoot.isDirectory()) return null;
+        File nested = new File(sourceRoot, "src/main/java");
+        return nested.isDirectory() ? nested : sourceRoot;
     }
 
     /**
