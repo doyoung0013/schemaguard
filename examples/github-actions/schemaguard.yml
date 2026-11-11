@@ -1,0 +1,219 @@
+# SchemaGuard GitHub Actions workflow (검사 대상 Spring Boot 프로젝트의 .github/workflows/에 복사)
+#
+# 동작
+#   1. PR에서 추가/수정된 마이그레이션 SQL만 고른다 (삭제된 파일 제외)
+#   2. SQL 파일마다 SchemaGuard를 실행한다. 한 파일이 실패해도 나머지를 계속 분석한다
+#   3. JSON 리포트의 summary.blocked(HIGH 위험 또는 SQL 파싱 실패)와 종료 코드로 병합 차단 여부를 판단한다
+#   4. 결과를 Step Summary에 쓰고 리포트를 Artifact로 올린다
+#
+# 종료 코드: 0 통과 / 1 HIGH 위험 / 2 실행 오류 / 3 SQL 파싱 실패(분석 불완전)
+
+name: SchemaGuard - Schema Change Analysis
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '**.sql'
+
+permissions:
+  contents: read
+
+jobs:
+  schema-guard:
+    name: Analyze Schema Changes
+    runs-on: ubuntu-latest
+
+    env:
+      SCHEMAGUARD_REPO: https://github.com/doyoung0013/schemaguard.git
+      SCHEMAGUARD_REF: main                        # 재현 가능한 결과가 필요하면 태그나 커밋으로 고정
+      SCHEMAGUARD_DIR: ${{ github.workspace }}/.schemaguard-tool
+      REPORT_DIR: ${{ github.workspace }}/build/reports/schemaguard
+      MIGRATION_DIR: src/main/resources/db/migration
+      SOURCE_DIR: src/main/java
+      SCHEMAGUARD_LANG: en
+
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Gradle (with cache)
+        uses: gradle/actions/setup-gradle@v4
+
+      # 파일명은 PR 작성자가 정할 수 있으므로 ${{ }}로 스크립트에 직접 넣지 않고 파일/환경변수로 넘긴다.
+      - name: Detect changed SQL migration files
+        id: changed-sql
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git diff --name-only --diff-filter=d "origin/${BASE_REF}...HEAD" \
+            | grep -E "^${MIGRATION_DIR}/.*\.sql$" \
+            > "$RUNNER_TEMP/changed-sql.txt" || true
+
+          echo "Changed SQL migration files:"
+          cat "$RUNNER_TEMP/changed-sql.txt"
+
+          if [ -s "$RUNNER_TEMP/changed-sql.txt" ]; then
+            echo "sql_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "sql_changed=false" >> "$GITHUB_OUTPUT"
+            echo "✅ 마이그레이션 SQL 변경 없음. SchemaGuard 스킵." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # gradlew run은 0이 아닌 종료 코드를 모두 1로 바꾸므로 설치본을 직접 실행해 코드를 구분한다.
+      - name: Build SchemaGuard
+        if: steps.changed-sql.outputs.sql_changed == 'true'
+        run: |
+          git clone --depth 1 --branch "$SCHEMAGUARD_REF" "$SCHEMAGUARD_REPO" "$SCHEMAGUARD_DIR"
+          cd "$SCHEMAGUARD_DIR"
+          chmod +x gradlew
+          ./gradlew --no-daemon -q installDist
+
+      # 판정은 다음 단계에서 한다. 여기서는 모든 파일을 끝까지 분석하고 결과만 기록한다.
+      - name: Run SchemaGuard
+        if: steps.changed-sql.outputs.sql_changed == 'true'
+        run: |
+          set +e
+          mkdir -p "$REPORT_DIR"
+          : > "$REPORT_DIR/results.tsv"
+          BIN="$SCHEMAGUARD_DIR/lib/build/install/lib/bin/lib"
+
+          while IFS= read -r SQL_FILE; do
+            [ -z "$SQL_FILE" ] && continue
+            REPORT="$REPORT_DIR/$(basename "$SQL_FILE" .sql).json"
+
+            echo "::group::SchemaGuard: $SQL_FILE"
+            "$BIN" \
+              --source "$GITHUB_WORKSPACE/$SOURCE_DIR" \
+              --migration "$GITHUB_WORKSPACE/$SQL_FILE" \
+              --report-path "$REPORT"
+            CODE=$?
+            echo "::endgroup::"
+            echo "→ exit code $CODE"
+
+            printf '%s\t%s\t%s\n' "$SQL_FILE" "$CODE" "$REPORT" >> "$REPORT_DIR/results.tsv"
+          done < "$RUNNER_TEMP/changed-sql.txt"
+          exit 0
+
+      - name: Check results and write summary
+        if: steps.changed-sql.outputs.sql_changed == 'true'
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+
+          report_dir = os.environ["REPORT_DIR"]
+          summary_path = os.environ["GITHUB_STEP_SUMMARY"]
+
+          def cell(s):
+              return str(s).replace("|", "\\|").replace("\n", " ")
+
+          rows = []
+          with open(os.path.join(report_dir, "results.tsv"), encoding="utf-8") as f:
+              for line in f:
+                  line = line.rstrip("\n")
+                  if line:
+                      sql, code, path = line.split("\t")
+                      rows.append((sql, int(code), path))
+
+          out = ["## 🛡️ SchemaGuard Report", ""]
+          blocked_any = False
+
+          for sql, code, path in rows:
+              out += [f"### `{sql}`", ""]
+              data = None
+              if os.path.exists(path):
+                  with open(path, encoding="utf-8") as f:
+                      data = json.load(f)
+
+              if data is None or code not in (0, 1, 3):
+                  blocked_any = True
+                  out += [f"❌ **SchemaGuard 실행 오류** (exit code {code}). Run SchemaGuard 단계 로그를 확인하세요.", ""]
+                  continue
+
+              s = data.get("summary", {})
+              parse = data.get("parse", {})
+              apis = data.get("affectedApis", [])
+              blocked = bool(s.get("blocked")) or code != 0
+              blocked_any |= blocked
+
+              if s.get("hasHighRisk"):
+                  overall = "🔴 HIGH"
+              elif s.get("medium", 0) > 0:
+                  overall = "🟡 MEDIUM"
+              else:
+                  overall = "🟢 LOW"
+              if not s.get("analysisComplete", True):
+                  overall += " (⚠️ 분석 불완전)"
+
+              out += [
+                  "| 항목 | 값 |", "|---|---|",
+                  f"| 전체 위험도 | {overall} |",
+                  f"| 🔴 HIGH | {s.get('high', 0)}건 |",
+                  f"| 🟡 MEDIUM | {s.get('medium', 0)}건 |",
+                  f"| 🟢 LOW | {s.get('low', 0)}건 |",
+                  f"| 영향 API 수 | {len(apis)}개 |",
+                  f"| SQL 구문 | {parse.get('totalStatements', '-')}개 중 파싱 실패 {s.get('parseFailures', 0)}개 |",
+                  f"| 판정 | {'❌ 차단' if blocked else '✅ 통과'} |",
+                  "",
+              ]
+
+              failures = parse.get("failures", [])
+              if failures:
+                  out += ["#### ⚠️ 파싱하지 못한 SQL 구문", "",
+                          "SchemaGuard가 읽지 못한 구문은 영향 여부를 알 수 없으므로 차단합니다.", "",
+                          "| 줄 | 구문 | 사유 |", "|---|---|---|"]
+                  for fl in failures:
+                      out.append(f"| {fl.get('line')} | `{cell(fl.get('statement', ''))[:120]}` | {cell(fl.get('reason', ''))} |")
+                  out.append("")
+
+              src_fail = parse.get("sourceParseFailures", [])
+              if src_fail:
+                  out += [f"> ℹ️ Java 파일 {len(src_fail)}개를 파싱하지 못해 해당 파일의 영향 경로가 누락될 수 있습니다.", ""]
+
+              if apis:
+                  out += ["#### 🔥 영향받는 API", "",
+                          "| # | API | 위험도 | 변경 유형 | 테이블.컬럼 |", "|---|---|---|---|---|"]
+                  for i, api in enumerate(apis, 1):
+                      risk = api.get("riskLevel", "-")
+                      badge = {"HIGH": "🔴", "MEDIUM": "🟡"}.get(risk, "🟢")
+                      c = api.get("cause", {})
+                      out.append(f"| {i} | `{cell(api.get('apiId', '-'))}` | {badge} {risk} | {c.get('type', '-')} "
+                                 f"| {c.get('table') or '-'}.{c.get('column') or '-'} |")
+                  out.append("")
+                  for api in apis:
+                      out += [f"<details><summary>{cell(api.get('apiId', '-'))} 영향 경로</summary>", "", "```"]
+                      for n in api.get("impactPath", []):
+                          loc = f"  ({n.get('filePath')}:{n.get('line')})" if n.get("line") else ""
+                          out.append(f"-> [{n.get('type', '')}] {n.get('name', '')}{loc}")
+                      out += ["```", "", "</details>", ""]
+
+          out += ["---"]
+          if blocked_any:
+              out += ["## ❌ 병합 차단됨", "",
+                      "> HIGH 위험도 변경 또는 분석할 수 없는 SQL 구문이 있습니다. 영향받는 코드를 수정하거나 구문을 확인한 뒤 다시 push 해주세요."]
+          else:
+              out += ["## ✅ 병합 가능", "", "> HIGH 위험도 없음, 모든 SQL 구문 분석 완료."]
+
+          with open(summary_path, "a", encoding="utf-8") as f:
+              f.write("\n".join(out) + "\n")
+
+          print("🚨 SchemaGuard: 병합 차단" if blocked_any else "✅ SchemaGuard: 병합 가능")
+          sys.exit(1 if blocked_any else 0)
+          PY
+
+      - name: Upload SchemaGuard reports
+        if: always() && steps.changed-sql.outputs.sql_changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: schemaguard-reports
+          path: ${{ env.REPORT_DIR }}/
+          retention-days: 30

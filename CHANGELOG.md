@@ -15,6 +15,52 @@
 
 ---
 
+## 5. GitHub Actions 워크플로 수정본 추가
+
+`readme.md`의 워크플로 예시는 수정하지 않았습니다. 고친 버전은 **`examples/github-actions/schemaguard.yml`** 에 있습니다. 검사 대상 프로젝트의 `.github/workflows/`에 이 파일을 복사하면 됩니다.
+
+**기존 워크플로의 문제**
+
+| # | 문제 | 결과 |
+|---|---|---|
+| 1 | Run 단계에서 SchemaGuard가 0이 아닌 코드로 끝나면 `bash -e` 때문에 단계가 즉시 실패 | 첫 HIGH 파일 이후 나머지 SQL은 분석되지 않고, HIGH 체크/Step Summary 단계는 건너뜀 |
+| 2 | `--output json` 없이 `--report-path`만 넘김 | JSON이 생성되지 않음 (3번 변경으로 해결) |
+| 3 | `git diff`에 **삭제된** SQL 파일도 포함 | 없는 파일을 분석하다 실행 오류 |
+| 4 | 파일명을 `${{ steps...sql_files }}`로 `run:` 스크립트에 직접 삽입 | PR 작성자가 파일명으로 셸 명령어를 주입할 수 있음 (예: `V4__$(curl ...).sql`) |
+| 5 | `./gradlew run`으로 실행 | 종료 코드가 모두 1로 바뀌어 HIGH/오류/파싱 실패를 구분할 수 없음 |
+| 6 | 판정에 `hasHighRisk`만 사용 | SQL 파싱 실패가 있어도 통과 |
+
+**수정본의 동작**
+
+1. `git diff --diff-filter=d`로 추가/수정된 마이그레이션 SQL만 고릅니다. 목록은 파일로 넘기고 스크립트에 삽입하지 않습니다.
+2. SchemaGuard를 `installDist`로 한 번 빌드한 뒤 설치본을 직접 실행합니다. 종료 코드 0/1/2/3을 그대로 받습니다.
+3. Run 단계는 판정하지 않고 모든 SQL 파일을 끝까지 분석해 `results.tsv`(파일, 종료 코드, 리포트 경로)에 기록합니다.
+4. Check 단계에서 파일별로 판정합니다.
+   - 리포트가 없거나 종료 코드가 0/1/3이 아니면 **실행 오류 → 차단**
+   - `summary.blocked`(HIGH 또는 파싱 실패)가 true이거나 종료 코드가 0이 아니면 **차단**
+5. Step Summary에 파일별 위험도, 파싱 실패 구문(줄 번호), 영향 API, 영향 경로를 표시합니다.
+6. 리포트는 성공/실패와 관계없이 Artifact로 올립니다.
+7. 그 밖에 `permissions: contents: read`로 최소 권한을 지정했고, Gradle 캐시를 `gradle/actions/setup-gradle`로 바꿨습니다. SchemaGuard 버전은 `SCHEMAGUARD_REF`로 고정할 수 있습니다.
+
+**검증 (로컬 시뮬레이션)**
+
+워크플로 YAML에서 각 단계의 스크립트를 추출해 GitHub Actions 기본 셸(`bash -eo pipefail`)로 실행했습니다. 가짜 PR 저장소에는 아래 변경을 넣었습니다.
+
+| PR 변경 | 결과 |
+|---|---|
+| `V1__init.sql` 삭제 | 분석 대상에서 제외 |
+| `V2__drop_email.sql` (DROP COLUMN) | 종료 코드 1, HIGH, `GET /me` 영향 경로 표시 → 차단 |
+| `V3__bad.sql` (2개 중 1개 파싱 불가) | 종료 코드 3, "분석 불완전", 실패 구문 줄 2 표시 → 차단 |
+| `V4__$(touch PWNED).sql` (주입 시도 파일명) | 명령어 실행되지 않음(PWNED 파일 없음), 종료 코드 0 → 통과 |
+| 리포트 없음 + 종료 코드 2 | 실행 오류로 차단 |
+| 안전한 파일만 있는 경우 | 병합 가능, Check 단계 종료 코드 0 |
+
+> GitHub에서 직접 돌려보지는 않았습니다. `actions/checkout`, `setup-java`, `setup-gradle`, `upload-artifact` 단계는 실제 PR에서 한 번 확인이 필요합니다.
+
+**관련 파일**: `examples/github-actions/schemaguard.yml`(신규)
+
+---
+
 ## 4. 테이블 이름 변경, `ALTER COLUMN ... SET NOT NULL` / `TYPE` 탐지
 
 **문제**
