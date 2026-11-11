@@ -11,6 +11,12 @@ application {
     mainClass = 'schemaguard.SchemaGuardMain'
 }
 
+// 소스는 UTF-8로 저장되어 있다. 지정하지 않으면 Windows에서 MS949로 컴파일되어
+// 한글 문자열 리터럴(콘솔 리포트)이 깨진다.
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
 tasks.withType(JavaExec).configureEach {
     jvmArgs '-Dfile.encoding=UTF-8'
     systemProperty 'file.encoding', 'UTF-8'

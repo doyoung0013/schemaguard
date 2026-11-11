@@ -15,6 +15,41 @@
 
 ---
 
+## 2. Windows에서 한글 리포트가 깨지던 문제 수정
+
+**문제**
+
+원인이 두 군데 있었습니다.
+
+1. `build.gradle`에 컴파일 인코딩 설정이 없어서 Windows에서는 소스(UTF-8)를 MS949로 읽어 컴파일했습니다. 경고(`unmappable character`)가 약 100건 나왔고, 한글 문자열 리터럴이 바이트 단위로 깨졌습니다.
+2. `run` 태스크의 프로그램은 UTF-8로 출력하는데, Gradle 데몬(MS949)이 그 출력을 MS949로 읽어 다시 쓰면서 한 번 더 깨졌습니다. 결과적으로 UTF-8로도 CP949로도 읽을 수 없는 바이트가 나왔습니다.
+
+**변경**
+
+- `lib/build.gradle`: `JavaCompile` 태스크에 `options.encoding = 'UTF-8'`을 지정했습니다.
+- `gradle.properties`(신규): `org.gradle.jvmargs=-Dfile.encoding=UTF-8`로 Gradle 데몬도 UTF-8로 실행합니다.
+
+**결과**
+
+- 컴파일 인코딩 경고: 100건 → 0건
+- `./gradlew run` 출력은 이제 터미널 기본 인코딩(한국어 Windows는 CP949)과 일치해서 기본 cmd/PowerShell에서 정상적으로 보입니다.
+- 터미널이 UTF-8(코드 페이지 65001, Git Bash, Windows Terminal 일부 설정)이면 Gradle 클라이언트 쪽 인코딩도 맞춰야 합니다. 이 설정은 `gradle.properties`로는 지정할 수 없습니다.
+
+  ```powershell
+  $env:GRADLE_OPTS="-Dfile.encoding=UTF-8"
+  ./gradlew run --args="..."
+  ```
+
+  ```bash
+  GRADLE_OPTS=-Dfile.encoding=UTF-8 ./gradlew run --args="..."
+  ```
+
+  기존 방법인 `SCHEMAGUARD_LANG=en`(영어 리포트)도 그대로 쓸 수 있습니다. Linux CI(GitHub Actions)는 원래 UTF-8이라 영향이 없습니다.
+
+**관련 파일**: `lib/build.gradle`, `gradle.properties`(신규)
+
+---
+
 ## 1. SQL 파싱 실패 시 "변경 없음"으로 통과하던 문제 수정
 
 **문제**
