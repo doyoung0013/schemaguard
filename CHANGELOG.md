@@ -15,6 +15,59 @@
 
 ---
 
+## 3. JSON 리포트: 파싱 실패 포함, `--report-path`만 줘도 생성, 항상 생성
+
+**문제**
+
+- JSON 리포트는 `--output json`일 때만 만들어졌습니다. 그런데 `readme.md`의 실행 예시와 GitHub Actions 예시는 `--report-path`만 넘기고 있어서 **실제로는 JSON 파일이 생성되지 않았습니다**.
+- 마이그레이션에서 변경을 하나도 찾지 못하면 리포트를 쓰기 전에 종료해서 JSON이 없었습니다.
+- 1번에서 추가한 SQL 파싱 실패 정보는 콘솔에만 찍히고 JSON에는 없었습니다. JSON만 보면 "HIGH 0건, 깨끗함"으로 보였습니다.
+- JSON 쓰기에 실패하면 에러 한 줄만 찍고 정상 종료 코드를 냈습니다.
+
+**변경**
+
+- 출력 규칙:
+
+  | 옵션 | 콘솔 리포트 | JSON 리포트 |
+  |---|---|---|
+  | (기본) | O | X |
+  | `--report-path <경로>` | O | O (지정 경로) |
+  | `--output json` | X | O (`--report-path` 또는 `./schemaguard-report.json`) |
+
+  `readme.md`에 적힌 명령이 문서대로 JSON까지 만들게 됩니다.
+- 변경 사항이 0건이어도 리포트를 항상 생성합니다.
+- 리포트 경로의 상위 디렉터리가 없으면 만듭니다.
+- JSON 쓰기에 실패하면 종료 코드 2로 끝냅니다. 리포트 없이 통과하지 않게 하려는 것입니다.
+- JSON 스키마 추가 필드:
+
+  ```jsonc
+  {
+    "summary": {
+      "high": 1, "medium": 0, "low": 0,
+      "hasHighRisk": true,
+      "parseFailures": 0,          // 신규: 파싱 실패 구문 수
+      "analysisComplete": true,    // 신규: 파싱 실패가 없으면 true
+      "blocked": true              // 신규: hasHighRisk || 파싱 실패 → CI 차단 여부
+    },
+    "parse": {                     // 신규
+      "totalStatements": 2,
+      "failedStatements": 0,
+      "failures": [ { "line": 2, "statement": "...", "reason": "..." } ],
+      "detectedChanges": [ "[HIGH] DROP_COLUMN on users.email" ],
+      "sourceParseFailures": []    // JavaParser가 읽지 못한 .java 파일 (경고만, 차단하지 않음)
+    },
+    "affectedApis": [ ... ]        // 기존과 동일
+  }
+  ```
+
+**알려진 한계**
+
+- Java 소스 파일 파싱 실패(`sourceParseFailures`)는 기존처럼 경고로만 남기고 차단하지 않습니다. 해당 파일이 관여하는 영향 경로가 누락될 수 있습니다.
+
+**관련 파일**: `SchemaGuardCLI.java`, `JsonReporter.java`, `SchemaGuardCLITest.java`(신규, 샘플 프로젝트로 종료 코드와 JSON 검증)
+
+---
+
 ## 2. Windows에서 한글 리포트가 깨지던 문제 수정
 
 **문제**

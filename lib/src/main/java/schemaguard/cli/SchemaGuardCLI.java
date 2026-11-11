@@ -24,7 +24,7 @@ import java.util.concurrent.Callable;
     exitCodeList = {
         "0:No HIGH risk detected and every SQL statement was parsed.",
         "1:HIGH risk change affects at least one API.",
-        "2:Unexpected error (e.g. migration file not found).",
+        "2:Unexpected error (e.g. migration file not found, report write failed).",
         "3:One or more SQL statements could not be parsed (analysis incomplete)."
     }
 )
@@ -35,16 +35,22 @@ public class SchemaGuardCLI implements Callable<Integer> {
     static final int EXIT_ERROR         = 2;
     static final int EXIT_PARSE_FAILURE = 3;
 
+    private static final String DEFAULT_REPORT_PATH = "./schemaguard-report.json";
+
     @Option(names = {"--source", "-s"}, description = "Spring Boot 소스 루트 (src/main/java)", required = true)
     private String sourcePath;
 
     @Option(names = {"--migration", "-m"}, description = "분석할 SQL 마이그레이션 파일", required = true)
     private String migrationPath;
 
-    @Option(names = {"--output", "-o"}, description = "출력 포맷: console(기본값) | json", defaultValue = "console")
+    @Option(names = {"--output", "-o"},
+            description = "출력 포맷: console(기본값, --report-path 지정 시 JSON도 저장) | json(JSON만)",
+            defaultValue = "console")
     private String outputFormat;
 
-    @Option(names = {"--report-path", "-r"}, description = "JSON 저장 경로", defaultValue = "./schemaguard-report.json")
+    @Option(names = {"--report-path", "-r"},
+            description = "JSON 리포트 저장 경로. 지정하면 console 모드에서도 JSON을 함께 저장한다. "
+                    + "(json 모드 기본값: " + DEFAULT_REPORT_PATH + ")")
     private String reportPath;
 
     @Override
@@ -66,64 +72,23 @@ public class SchemaGuardCLI implements Callable<Integer> {
             printParseFailures(parsed);
             System.out.println();
 
+            List<String> sourceParseFailures = new ArrayList<>();
+            ImpactResult result;
+
             if (changes.isEmpty()) {
                 System.out.println("No schema changes detected in migration file.");
-                return finishWithParseCheck(parsed, EXIT_OK);
+                result = new ImpactResult(List.of());
+            } else {
+                System.out.println("Detected " + changes.size() + " schema change(s):");
+                changes.forEach(c -> System.out.println("  " + c));
+                System.out.println();
+                result = analyze(changes, sourceParseFailures);
             }
 
-            System.out.println("Detected " + changes.size() + " schema change(s):");
-            changes.forEach(c -> System.out.println("  " + c));
-            System.out.println();
-
-            List<File> javaFiles = collectJavaFiles(new File(sourcePath));
-            System.out.println("Scanning " + javaFiles.size() + " Java source files...");
-
-            EntityParser entityParser = new EntityParser();
-            RepositoryParser repositoryParser = new RepositoryParser();
-            ServiceParser serviceParser = new ServiceParser();
-            ControllerParser controllerParser = new ControllerParser();
-
-            List<EntityMapping> entities = new ArrayList<>();
-            List<FkMapping> fkMappings = new ArrayList<>();
-            List<RepositoryInfo> repos = new ArrayList<>();
-            List<ServiceInfo> services = new ArrayList<>();
-            List<ControllerInfo> controllers = new ArrayList<>();
-
-            for (File javaFile : javaFiles) {
-                try {
-                    EntityParser.ParseResult pr = entityParser.parse(javaFile);
-                    entities.addAll(pr.entityMappings());
-                    fkMappings.addAll(pr.fkMappings());
-
-                    repos.addAll(repositoryParser.parse(javaFile));
-                    services.addAll(serviceParser.parse(javaFile));
-                    controllers.addAll(controllerParser.parse(javaFile));
-                } catch (Exception e) {
-                    System.err.println("  [WARN] Parse failed: " + javaFile.getName()
-                            + " (" + e.getMessage() + ")");
-                }
+            // 변경이 없어도 리포트는 항상 만든다. CI가 리포트 파일 유무로 헷갈리지 않도록.
+            for (ReportGenerator reporter : reporters(parsed, sourceParseFailures)) {
+                reporter.generate(result);
             }
-
-            System.out.println("  Entities    : " + entities.size() + " fields");
-            System.out.println("  FK Mappings : " + fkMappings.size() + " relations");
-            System.out.println("  Repositories: " + repos.size());
-            System.out.println("  Services    : " + services.size());
-            System.out.println("  Controllers : " + controllers.size());
-            System.out.println();
-
-            DependencyGraphBuilder builder = new DependencyGraphBuilder();
-            builder.setSourceRoot(sourcePath);   // ← 파일 위치를 상대경로로 정규화하기 위해 필요
-            builder.build(entities, fkMappings, repos, services, controllers);
-
-            ImpactAnalyzer analyzer = new ImpactAnalyzer(builder.getGraph(), builder.getNodeIndex());
-            ImpactResult result = analyzer.analyze(changes);
-
-            ReportGenerator reporter = switch (outputFormat.toLowerCase()) {
-                case "json" -> new JsonReporter(reportPath);
-                default -> new ConsoleReporter();
-            };
-
-            reporter.generate(result);
 
             return finishWithParseCheck(parsed, result.hasHighRisk() ? EXIT_HIGH_RISK : EXIT_OK);
 
@@ -132,6 +97,71 @@ public class SchemaGuardCLI implements Callable<Integer> {
             e.printStackTrace();
             return EXIT_ERROR;
         }
+    }
+
+    private ImpactResult analyze(List<SchemaChange> changes, List<String> sourceParseFailures) {
+        List<File> javaFiles = collectJavaFiles(new File(sourcePath));
+        System.out.println("Scanning " + javaFiles.size() + " Java source files...");
+
+        EntityParser entityParser = new EntityParser();
+        RepositoryParser repositoryParser = new RepositoryParser();
+        ServiceParser serviceParser = new ServiceParser();
+        ControllerParser controllerParser = new ControllerParser();
+
+        List<EntityMapping> entities = new ArrayList<>();
+        List<FkMapping> fkMappings = new ArrayList<>();
+        List<RepositoryInfo> repos = new ArrayList<>();
+        List<ServiceInfo> services = new ArrayList<>();
+        List<ControllerInfo> controllers = new ArrayList<>();
+
+        for (File javaFile : javaFiles) {
+            try {
+                EntityParser.ParseResult pr = entityParser.parse(javaFile);
+                entities.addAll(pr.entityMappings());
+                fkMappings.addAll(pr.fkMappings());
+
+                repos.addAll(repositoryParser.parse(javaFile));
+                services.addAll(serviceParser.parse(javaFile));
+                controllers.addAll(controllerParser.parse(javaFile));
+            } catch (Exception e) {
+                System.err.println("  [WARN] Parse failed: " + javaFile.getName()
+                        + " (" + e.getMessage() + ")");
+                sourceParseFailures.add(javaFile.getPath());
+            }
+        }
+
+        System.out.println("  Entities    : " + entities.size() + " fields");
+        System.out.println("  FK Mappings : " + fkMappings.size() + " relations");
+        System.out.println("  Repositories: " + repos.size());
+        System.out.println("  Services    : " + services.size());
+        System.out.println("  Controllers : " + controllers.size());
+        System.out.println();
+
+        DependencyGraphBuilder builder = new DependencyGraphBuilder();
+        builder.setSourceRoot(sourcePath);   // ← 파일 위치를 상대경로로 정규화하기 위해 필요
+        builder.build(entities, fkMappings, repos, services, controllers);
+
+        ImpactAnalyzer analyzer = new ImpactAnalyzer(builder.getGraph(), builder.getNodeIndex());
+        return analyzer.analyze(changes);
+    }
+
+    /**
+     * console(기본): 콘솔 리포트 + (--report-path 지정 시) JSON 리포트
+     * json        : JSON 리포트만 (경로 미지정 시 기본 경로)
+     */
+    private List<ReportGenerator> reporters(MigrationParser.ParseResult parsed,
+                                            List<String> sourceParseFailures) {
+        List<ReportGenerator> list = new ArrayList<>();
+        boolean jsonOnly = "json".equalsIgnoreCase(outputFormat);
+
+        if (!jsonOnly) {
+            list.add(new ConsoleReporter());
+        }
+        if (jsonOnly || reportPath != null) {
+            String path = reportPath != null ? reportPath : DEFAULT_REPORT_PATH;
+            list.add(new JsonReporter(path, parsed, sourceParseFailures));
+        }
+        return list;
     }
 
     /**
