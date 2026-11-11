@@ -35,6 +35,9 @@ public class DependencyGraphBuilder {
      */
     private final Map<String, List<Node>> writeMethodsByTable = new HashMap<>();
 
+    /** static 메서드를 가진 DTO·매퍼 클래스명 (ServiceInfo.isHelper) */
+    private final Set<String> helperClasses = new java.util.HashSet<>();
+
     /** CLI 에서 전달받는 --source 경로 (src/main/java 의 부모 또는 그 자체) */
     private String sourceRoot = "";
 
@@ -267,31 +270,54 @@ public class DependencyGraphBuilder {
             }
         }
 
-        // 서비스의 지연 로딩 초기화: 같은 이름의 FK 필드가 모두 같은 엔티티를 가리킬 때만 연결한다.
+        // 서비스·DTO 의 지연 로딩 초기화: 같은 이름의 FK 필드가 모두 같은 엔티티를 가리킬 때만 연결한다.
         for (ServiceInfo svc : services) {
             for (ServiceInfo.AssociationAccess a : svc.getAssociationAccesses()) {
                 List<FkMapping> candidates = fkByField.getOrDefault(a.attribute(), List.of());
                 Set<String> refs = new java.util.TreeSet<>();
                 candidates.forEach(fk -> refs.add(fk.getReferencedEntity()));
                 if (refs.size() != 1 || !known.test(refs.iterator().next())) continue;
-                Node svcNode = getOrCreate("svc:" + svc.getClassName() + "." + a.callerMethod(),
-                        NodeType.SERVICE, svc.getClassName() + "." + a.callerMethod(),
-                        svc.getFilePath(), a.callerLine());
-                addEdge(svcNode, load.apply(refs.iterator().next()), RelationType.LOADS);
+                addEdge(methodNode(svc, a.callerMethod(), a.callerLine()),
+                        load.apply(refs.iterator().next()), RelationType.LOADS);
+            }
+            // 엔티티 타입 파라미터의 getter: AuthorDto.from(User user) { user.getNickname() } → User 초기화
+            for (ServiceInfo.EntityTypeAccess a : svc.getEntityTypeAccesses()) {
+                if (!known.test(a.entityType())) continue;
+                addEdge(methodNode(svc, a.callerMethod(), a.callerLine()),
+                        load.apply(a.entityType()), RelationType.LOADS);
             }
         }
+    }
+
+    /** 서비스 메서드는 "svc:", DTO·매퍼 static 메서드는 "helper:" 노드 */
+    private Node methodNode(ServiceInfo svc, String method, int line) {
+        return getOrCreate(svc.nodePrefix() + svc.getClassName() + "." + method,
+                svc.isHelper() ? NodeType.HELPER : NodeType.SERVICE,
+                svc.getClassName() + "." + method, svc.getFilePath(), line);
+    }
+
+    /** static 호출 대상이 알려진 helper 클래스면 그 노드, 아니면 null (List.of, ResponseEntity.ok 등은 무시) */
+    private Node helperNode(String className, String method, int line) {
+        if (!helperClasses.contains(className)) return null;
+        return getOrCreate("helper:" + className + "." + method, NodeType.HELPER,
+                className + "." + method, null, line);
     }
 
     // ── 4단계: Service → Repository ──────────────────────────────────────────
 
     private void addServiceEdges(List<ServiceInfo> services) {
+        helperClasses.clear();
+        for (ServiceInfo svc : services) if (svc.isHelper()) helperClasses.add(svc.getClassName());
+
         for (ServiceInfo svc : services) {
+            // 서비스/DTO → DTO static 메서드 (ReportResponse.from, ReportResponse::from)
+            for (ServiceInfo.StaticCall call : svc.getStaticCalls()) {
+                Node callee = helperNode(call.calleeClass(), call.calleeMethod(), call.line());
+                if (callee != null)
+                    addEdge(methodNode(svc, call.callerMethod(), call.callerLine()), callee, RelationType.CALLS);
+            }
             for (ServiceInfo.MethodCall call : svc.getMethodCalls()) {
-                Node svcNode = getOrCreate(
-                        "svc:" + svc.getClassName() + "." + call.callerMethod,
-                        NodeType.SERVICE,
-                        svc.getClassName() + "." + call.callerMethod,
-                        svc.getFilePath(), call.callerLine);
+                Node svcNode = methodNode(svc, call.callerMethod, call.callerLine);
 
                 NodeType calleeType   = call.calleeClass.contains("Repository")
                         ? NodeType.REPOSITORY : NodeType.SERVICE;
@@ -331,6 +357,11 @@ public class DependencyGraphBuilder {
                             call.serviceClass() + "." + call.serviceMethod(),
                             null, call.line());
                     addEdge(ctrlNode, svcNode, RelationType.CALLS);
+                }
+                // 컨트롤러에서 바로 DTO 로 변환하는 경우 (UserResponse.from(user))
+                for (ControllerInfo.ServiceCall call : ep.staticCalls) {
+                    Node helper = helperNode(call.serviceClass(), call.serviceMethod(), call.line());
+                    if (helper != null) addEdge(ctrlNode, helper, RelationType.CALLS);
                 }
             }
         }

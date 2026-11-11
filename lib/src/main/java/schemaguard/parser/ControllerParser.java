@@ -69,8 +69,12 @@ public class ControllerParser {
                         calls.putIfAbsent(type + "." + call.getNameAsString(),
                                 new ControllerInfo.ServiceCall(type, call.getNameAsString(), line));
                     }
+                    // DTO 변환 등 static 호출 (UserResponse.from(user), Type::method). 서비스 호출과 따로 둔다.
+                    Map<String, ControllerInfo.ServiceCall> statics = new LinkedHashMap<>();
+                    AccessCollector.staticCalls(method, (type, name, line) ->
+                            statics.putIfAbsent(type + "." + name, new ControllerInfo.ServiceCall(type, name, line)));
                     info.addEndpoint(httpMethod, fullPath, method.getNameAsString(), methodLine,
-                            new ArrayList<>(calls.values()));
+                            new ArrayList<>(calls.values()), new ArrayList<>(statics.values()));
                 }
             }
             result.add(info);

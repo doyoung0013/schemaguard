@@ -36,8 +36,15 @@ public class ControllerInfo {
     public void addEndpoint(String httpMethod, String path,
                             String controllerMethod, int methodLine,
                             List<ServiceCall> serviceCalls) {
+        addEndpoint(httpMethod, path, controllerMethod, methodLine, serviceCalls, List.of());
+    }
+
+    /** @param staticCalls Type.method(...) / Type::method 호출 (DTO 변환 등). 알려진 helper 클래스만 그래프에 연결된다. */
+    public void addEndpoint(String httpMethod, String path,
+                            String controllerMethod, int methodLine,
+                            List<ServiceCall> serviceCalls, List<ServiceCall> staticCalls) {
         endpoints.add(new EndpointMapping(
-                httpMethod, path, controllerMethod, methodLine, serviceCalls));
+                httpMethod, path, controllerMethod, methodLine, serviceCalls, staticCalls));
     }
 
     public String                  getClassName() { return className; }
@@ -56,6 +63,7 @@ public class ControllerInfo {
         public final String controllerMethod;
         public final int    methodLine;          // @GetMapping 메서드 선언 라인
         public final List<ServiceCall> serviceCalls;
+        public final List<ServiceCall> staticCalls;
 
         // 첫 번째 호출 (기존 필드 호환용; 없으면 null / -1)
         public final String calleeServiceClass;
@@ -65,6 +73,13 @@ public class ControllerInfo {
         public EndpointMapping(String httpMethod, String path,
                                String controllerMethod, int methodLine,
                                List<ServiceCall> serviceCalls) {
+            this(httpMethod, path, controllerMethod, methodLine, serviceCalls, List.of());
+        }
+
+        public EndpointMapping(String httpMethod, String path,
+                               String controllerMethod, int methodLine,
+                               List<ServiceCall> serviceCalls, List<ServiceCall> staticCalls) {
+            this.staticCalls         = List.copyOf(staticCalls);
             this.httpMethod          = httpMethod;
             this.path                = path;
             this.controllerMethod    = controllerMethod;

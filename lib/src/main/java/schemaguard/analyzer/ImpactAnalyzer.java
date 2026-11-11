@@ -107,18 +107,32 @@ public class ImpactAnalyzer {
     }
 
 
+    /**
+     * 시작 노드에서 API 까지 역방향 탐색. 각 API 에 대해 (연관 로딩 노드 수, 경로 길이)가 가장 작은 경로 하나를 남긴다.
+     * 직접 조회 경로(컬럼 → 필드 → 리포지토리 → …)가 있으면 연관 로딩을 거치는 더 짧은 경로보다 우선한다.
+     * 우선순위가 같으면 노드 id 순이라 결과가 입력 순서와 무관하다.
+     */
     private List<AffectedApi> bfs(Node startNode, SchemaChange change) {
         List<AffectedApi> result = new ArrayList<>();
         Map<Node, Node>   parent  = new LinkedHashMap<>();
-        Queue<Node>       queue   = new LinkedList<>();
+        Map<Node, long[]> best    = new HashMap<>();      // node → {loads, depth}
         Set<Node>         visited = new HashSet<>();
+        PriorityQueue<Object[]> queue = new PriorityQueue<>((a, b) -> {
+            long[] x = (long[]) a[1], y = (long[]) b[1];
+            if (x[0] != y[0]) return Long.compare(x[0], y[0]);
+            if (x[1] != y[1]) return Long.compare(x[1], y[1]);
+            return ((Node) a[0]).getId().compareTo(((Node) b[0]).getId());
+        });
 
-        queue.add(startNode);
-        visited.add(startNode);
+        best.put(startNode, new long[]{0, 0});
         parent.put(startNode, null);
+        queue.add(new Object[]{startNode, best.get(startNode)});
 
         while (!queue.isEmpty()) {
-            Node current = queue.poll();
+            Object[] entry = queue.poll();
+            Node current = (Node) entry[0];
+            long[] cost = (long[]) entry[1];
+            if (!visited.add(current) || cost != best.get(current)) continue;
 
             if (current.getType() == NodeType.API) {
                 // Node 객체 그대로 경로 재구성 (위치 정보 보존)
@@ -140,10 +154,13 @@ public class ImpactAnalyzer {
             }
             neighbors.sort(BY_ID);
             for (Node neighbor : neighbors) {
-                if (!visited.contains(neighbor)) {
-                    visited.add(neighbor);
+                if (visited.contains(neighbor)) continue;
+                long[] next = {cost[0] + (neighbor.getType() == NodeType.ENTITY_LOAD ? 1 : 0), cost[1] + 1};
+                long[] old = best.get(neighbor);
+                if (old == null || next[0] < old[0] || (next[0] == old[0] && next[1] < old[1])) {
+                    best.put(neighbor, next);
                     parent.put(neighbor, current);
-                    queue.add(neighbor);
+                    queue.add(new Object[]{neighbor, next});
                 }
             }
         }
@@ -219,9 +236,14 @@ public class ImpactAnalyzer {
         return new ArrayList<>(byId.values());
     }
 
-    /** 경로 비교: 짧은 경로 우선, 길이가 같으면 노드 id 사전순. */
+    /**
+     * 경로 비교: 직접 경로(연관 로딩 노드를 덜 거치는 것) 우선 → 짧은 경로 → 노드 id 사전순.
+     * 직접 조회 경로가 있으면 그쪽이 수정 위치(필드·리포지토리)를 더 잘 보여준다.
+     */
     private static final Comparator<AffectedApi> BETTER_PATH =
-            Comparator.<AffectedApi>comparingInt(a -> a.getImpactNodes().size())
+            Comparator.<AffectedApi>comparingLong(a -> a.getImpactNodes().stream()
+                            .filter(n -> n.getType() == NodeType.ENTITY_LOAD).count())
+                    .thenComparingInt(a -> a.getImpactNodes().size())
                     .thenComparing(a -> String.join(">", a.getImpactPath()));
 
     /** 리포트 순서: 위험도(HIGH 먼저) → API → 원인. */

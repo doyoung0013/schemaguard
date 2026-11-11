@@ -15,6 +15,118 @@
 
 ---
 
+## 13. DTO·매퍼 static 메서드에서의 연관 로딩 추적
+
+11번에서는 연관 초기화(`x.getPost().getTitle()`)를 `@Service` 클래스 안에서만 찾았습니다. 그런데 실제 코드에서는 이 접근이 **DTO의 static 팩토리 메서드**에 있는 경우가 많습니다.
+
+```java
+// ReportService
+return reportRepository.findTop20ByOrderByIdDesc().stream().map(ReportSummaryResponse::from).toList();
+// ReportSummaryResponse
+public static ReportSummaryResponse from(Report report) {
+    ... report.getPost().getTitle() ... report.getReporter().getNickname() ...   // 여기서 LAZY 프록시 초기화
+}
+```
+
+community의 기존 API들은 같은 연관을 `@EntityGraph`로도 로딩하고 있어서 이 구멍이 측정에서 드러나지 않았습니다. 그래서 이번에는 **검증용 API를 먼저 추가해 실제로 놓치는 것을 확인**한 뒤에 고쳤습니다.
+
+### 1. 검증 시나리오 추가 (community, 커밋 `857f752`, `4f94c67`)
+
+| API | 경로 | 기대 |
+|---|---|---|
+| `GET /api/admin/reports/recent` | `@EntityGraph` 없는 `findTop20ByOrderByIdDesc()` → `.map(ReportSummaryResponse::from)` (메서드 참조) → DTO 안에서 `getPost().getTitle()`, `getReporter().getNickname()` | posts나 users 컬럼이 깨지면 실패 |
+| `GET /api/admin/reports/recent-ids` (대조군) | 같은 조회 → `.map(r -> ReportIdResponse.of(r))` (람다 안 static 호출) → DTO 안에서 `getPost().getId()`, `getReporter().getId()`만 읽음 | 프록시가 id를 갖고 있어 **실패하지 않아야 함** |
+
+- 두 서비스 메서드는 `@Transactional(readOnly = true)`입니다. 지연 로딩이 서비스 안의 DTO 변환에서 일어납니다.
+- 9번 하네스에 두 API를 추가해 엔드포인트를 30개로 늘린 뒤 실제 MySQL로 다시 측정했습니다. 13분 37초 걸렸습니다.
+  - 기준선 DB 오류: 0건
+  - 기존 28개 API의 결과는 18개 시나리오 모두 이전과 같았습니다.
+  - `recent`는 V0, V2, V3, V11에서 실패했습니다(`Unknown column 'u1_0.email'`, `'p1_0.title'`).
+  - `recent-ids`는 18개 시나리오 모두 통과했습니다.
+- 정확도 테스트는 `@Tag("accuracy")`를 붙여 **기본 `./gradlew test`에서 제외**했습니다. 실행하려면 `./gradlew test -Paccuracy --tests '*SchemaGuardAccuracyTest*'`를 씁니다. 그래서 community의 일반 테스트는 23초로 돌아왔습니다.
+
+**개선 전 SchemaGuard(`7d28edc`)로 비교한 결과:** `recent`의 실제 실패 4건을 **모두 놓쳤습니다**(FN 4, 재현율 96.0%).
+
+### 2. 변경 내용
+
+**helper 클래스 수집** (`ServiceParser`)
+- `@Service`가 아닌 일반 클래스(DTO, 매퍼 등)의 **static 메서드**를 `ServiceInfo(helper = true)`로 모읍니다.
+- 그래프 노드는 `helper:<Class>.<method>`(`NodeType.HELPER`)입니다.
+- 엔티티, 컨트롤러, 설정, 컴포넌트, 인터페이스는 제외합니다.
+
+**static 호출 수집** (`AccessCollector` 신규, 서비스·컨트롤러·helper 공용)
+- `Type.method(...)` 호출: 람다 안의 호출도 포함합니다.
+- `Type::method` 메서드 참조
+- 서비스→helper, 컨트롤러→helper, helper→helper 호출을 `CALLS` 엣지로 연결합니다. 예: `UserResponse.from(user)`
+- 연결은 **알려진 helper 클래스일 때만** 합니다. `ResponseEntity.ok`, `List.of` 같은 라이브러리 호출은 노드를 만들지 않습니다.
+- 컨트롤러의 static 호출은 기존 `serviceCalls`와 별도 목록(`EndpointMapping.staticCalls`)에 둡니다. 기존 "첫 서비스 호출" 호환 필드가 `ResponseEntity.ok` 같은 호출로 바뀌지 않게 하기 위해서입니다.
+
+**연관 초기화 신호 추가**
+- 기존 getter 체인(`x.getPost().getTitle()`)을 helper 메서드에서도 봅니다.
+- **엔티티 타입 파라미터의 getter**를 새로 봅니다. 중첩 DTO 패턴 `AuthorDto.from(User user) { user.getNickname() }`처럼 파라미터 타입이 엔티티이면, `getId()`가 아닌 getter 호출을 그 엔티티의 초기화로 봅니다. 같은 이름의 람다 파라미터가 가리는 경우는 제외합니다.
+
+**경로 선택 (`ImpactAnalyzer`)**
+- BFS를 **(연관 로딩 노드 수, 경로 길이) 순으로 최소인 경로**를 찾는 우선순위 탐색으로 바꿨습니다. 동률이면 노드 id 순입니다.
+- 이전 BFS는 처음 도달한 경로만 남겼습니다. 그래서 helper가 추가되자 `GET /me`가 `col:users.email → field:User.email → repo:UserRepository.findByEmail → …`(직접 경로) 대신 한 단계 짧은 `col:users.email → load:User → helper:UserResponse.from → …`로 바뀌었습니다.
+- 직접 조회 경로가 수정할 위치(필드, 리포지토리)를 더 잘 보여 주므로, 이제는 연관 로딩을 덜 거치는 경로를 먼저 고릅니다. 시작 노드가 여럿일 때의 중복 제거 기준(`BETTER_PATH`)도 같은 순서로 맞췄습니다.
+
+### 결과
+
+**30개 엔드포인트 측정 기준 (actual.json 새로 측정)**
+
+| | 개선 전 (`7d28edc`) | 개선 후 |
+|---|---:|---:|
+| 재현율 | 96.0% (95/99) | **100% (99/99)** |
+| 정밀도 (전체) | 95.0% | 95.2% (99/104) |
+| 정밀도 (HIGH) | 96.9% | 97.1% (99/102) |
+| 대조군 `recent-ids` | 예측 없음 | **예측 없음 (정답)** |
+
+새로 잡힌 경로:
+```
+V0 : col:users.email → load:User → helper:ReportSummaryResponse.from → svc:ReportService.getRecentSummaries → ctrl:AdminReportController.recentReports → api:GET /api/admin/reports/recent
+V3 : col:posts.title → load:Post → helper:ReportSummaryResponse.from → svc:ReportService.getRecentSummaries → … → api:GET /api/admin/reports/recent
+```
+
+남은 오탐 5건은 12번과 같습니다. 분기 한계 3건, 그리고 실제 MySQL로 위험을 확인한 MEDIUM 2건입니다.
+
+**기존 결과와의 비교 (회귀 확인)**
+- 이전 community 코드(`1151962`, 엔드포인트 28개)에서 12번 빌드와 새 빌드의 리포트를 비교했습니다.
+- (API, 원인) 집합은 18개 파일 모두 같았습니다. 경로만 27건 바뀌었습니다.
+  - 18건: 연관 로딩 경로 대신 직접 조회 경로를 고른 경우입니다. 예를 들어 `GET /api/bookmarks`는 로그인 사용자를 `UserRepository.findByEmail`로 조회하므로, 그 경로를 보여 줍니다.
+  - 7건: `@EntityGraph` 리포지토리 경로와 DTO helper 경로가 같은 길이일 때 id 순으로 helper가 선택된 경우입니다.
+  - 2건: 서비스 경로끼리 동률을 정리하는 순서가 바뀐 경우입니다.
+- 바뀐 경로에 포함된 연관 로딩 노드는 27개에서 7개로 줄었습니다.
+
+### 테스트
+
+- 신규 `HelperAssociationLoadTest` 6개
+  - 메서드 참조로 호출한 DTO의 연관 초기화와 그 경로(`helper:` 노드 포함)
+  - 중첩 DTO의 엔티티 파라미터 접근
+  - id만 읽는 DTO는 영향 없음
+  - 자기 테이블 변경은 두 API 모두 영향
+  - 알 수 없는 클래스의 static 호출 무시
+  - 파서 수집 결과
+- 결정성 스냅샷은 그대로입니다. 픽스처에 DTO가 없고, 직접 경로만 있습니다.
+- 전체 63개 통과
+
+### 성능
+
+| 파일 수 | graph | analyze (변경 12 / 100 / 1,000) |
+|---:|---:|---:|
+| 5,000 | 153 ms | 5.2 / 14.4 / 80.0 ms |
+| 20,000 | 609 ms | 5.9 / 19.3 / 86.0 ms |
+
+우선순위 큐 탐색으로 바꿨지만 분석 시간은 11번과 같은 수준입니다. 11번은 20,000개, 변경 1,000개에서 114ms였습니다.
+
+### 한계
+
+- **이름 관례에 의존합니다.** static 호출 대상은 대문자로 시작하는 이름(클래스명 관례)으로 판단합니다.
+- **인스턴스 메서드는 보지 않습니다.** 빈으로 주입된 매퍼의 인스턴스 메서드(`mapper.toDto(x)`, MapStruct 등)는 대상이 아닙니다. 주입 필드 타입을 이용해 연결할 수 있지만, MapStruct는 생성된 코드를 봐야 합니다.
+- **getter 체인과 파라미터만 봅니다.** 지역 변수에 연관을 꺼낸 뒤 접근하는 경우는 놓칩니다. 예: `Post p = report.getPost(); p.getTitle()`
+- **Thymeleaf 템플릿에서의 지연 로딩**은 아직 보지 않습니다. community는 템플릿에 DTO만 넘겨서 해당되지 않습니다.
+
+---
+
 ## 12. 위험도 판정 개선: 변경을 코드(엔티티 매핑)와 비교해 재분류
 
 11번까지의 남은 오탐 53건 중 50건은 그래프 탐색이 아니라 **변경 종류를 판정하는 방식**에서 나왔습니다(9번 분석). SQL만 보고 `MODIFY`는 모두 HIGH, FK 제약 변경도 HIGH로 판정했기 때문입니다. 이번에는 두 가지를 바꿨습니다.

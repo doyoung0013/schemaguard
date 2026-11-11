@@ -30,31 +30,32 @@ public class ServiceParser {
         List<ServiceInfo> result = new ArrayList<>();
 
         cu.findAll(ClassOrInterfaceDeclaration.class).forEach(clazz -> {
-            if (!isService(clazz)) return;
+            boolean service = isService(clazz);
+            // @Service 가 아닌 일반 클래스(DTO, 매퍼 등)는 static 메서드만 모은다.
+            // 예) ReportResponse.from(report) 안의 report.getPost().getTitle() 도 연관 로딩이다.
+            if (!service && !isHelperCandidate(clazz)) return;
 
             int classLine = clazz.getRange().map(r -> r.begin.line).orElse(-1);
-            ServiceInfo info = new ServiceInfo(clazz.getNameAsString(), filePath, classLine);
+            ServiceInfo info = new ServiceInfo(clazz.getNameAsString(), filePath, classLine, !service);
             Map<String, String> fieldTypeMap = buildFieldTypeMap(clazz);
 
             for (MethodDeclaration method : clazz.getMethods()) {
+                if (!service && !method.isStatic()) continue;
                 int methodLine = method.getRange().map(r -> r.begin.line).orElse(-1);
                 String callerMethod = method.getNameAsString();
 
                 // 연관 초기화: x.getPost().getTitle() 처럼 getter 결과에 다시 getId() 가 아닌 호출을 하면
                 // 지연 로딩 프록시가 초기화되어 연관 엔티티의 컬럼을 전부 SELECT 한다.
-                method.findAll(MethodCallExpr.class).forEach(call -> {
-                    String name = call.getNameAsString();
-                    if (!isGetter(call) || call.getScope().isEmpty()) return;
-                    call.getParentNode()
-                            .filter(p -> p instanceof MethodCallExpr)
-                            .map(p -> (MethodCallExpr) p)
-                            .filter(outer -> outer.getScope().map(s -> s == call).orElse(false))
-                            .filter(outer -> !outer.getNameAsString().equals("getId"))
-                            .ifPresent(outer -> info.addAssociationAccess(callerMethod, methodLine,
-                                    decapitalize(name.substring(3)),
-                                    call.getRange().map(r -> r.begin.line).orElse(methodLine)));
+                AccessCollector.getterChains(method, (attr, line) ->
+                        info.addAssociationAccess(callerMethod, methodLine, attr, line));
+                AccessCollector.entityParameterAccesses(method, (type, line) ->
+                        info.addEntityTypeAccess(callerMethod, methodLine, type, line));
+                AccessCollector.staticCalls(method, (type, name, line) -> {
+                    if (!type.equals(clazz.getNameAsString()) || !name.equals(callerMethod))
+                        info.addStaticCall(callerMethod, methodLine, type, name, line);
                 });
 
+                if (!service) continue;
                 method.findAll(MethodCallExpr.class).forEach(call ->
                         call.getScope().ifPresent(scope -> {
                             String calleeType = fieldTypeMap.get(scope.toString());
@@ -66,19 +67,22 @@ public class ServiceParser {
                             }
                         }));
             }
-            result.add(info);
+            if (service || !info.getAssociationAccesses().isEmpty() || !info.getEntityTypeAccesses().isEmpty()
+                    || !info.getStaticCalls().isEmpty()) {
+                result.add(info);
+            }
         });
         return result;
     }
 
-    private static boolean isGetter(MethodCallExpr call) {
-        String n = call.getNameAsString();
-        return n.length() > 3 && n.startsWith("get") && Character.isUpperCase(n.charAt(3))
-                && call.getArguments().isEmpty();
-    }
-
-    private static String decapitalize(String s) {
-        return s.isEmpty() ? s : Character.toLowerCase(s.charAt(0)) + s.substring(1);
+    /** DTO·매퍼 후보: 인터페이스/엔티티/컨트롤러/설정이 아니고 static 메서드가 있는 클래스. */
+    private boolean isHelperCandidate(ClassOrInterfaceDeclaration clazz) {
+        if (clazz.isInterface()) return false;
+        for (String a : List.of("Entity", "Embeddable", "MappedSuperclass", "Controller", "RestController",
+                "Configuration", "Repository", "Component", "SpringBootApplication")) {
+            if (clazz.getAnnotationByName(a).isPresent()) return false;
+        }
+        return clazz.getMethods().stream().anyMatch(MethodDeclaration::isStatic);
     }
 
     private boolean isService(ClassOrInterfaceDeclaration clazz) {
