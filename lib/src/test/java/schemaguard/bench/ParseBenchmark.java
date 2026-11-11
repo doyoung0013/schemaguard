@@ -180,7 +180,8 @@ public final class ParseBenchmark {
         builder.build(scan.entities(), scan.fkMappings(), scan.repositories(), scan.services(), scan.controllers());
         long t3 = System.nanoTime();
 
-        ImpactResult result = new ImpactAnalyzer(builder.getGraph(), builder.getNodeIndex()).analyze(changes);
+        ImpactResult result = new ImpactAnalyzer(builder.getGraph(), builder.getNodeIndex(),
+                builder.getFkFieldsReferencingTable()).analyze(changes);
         long t4 = System.nanoTime();
 
         sampler.interrupt();

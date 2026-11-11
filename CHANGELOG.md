@@ -15,6 +15,48 @@
 
 ---
 
+## 7. 실제 프로젝트(community) 검증에서 찾은 누락 2건 수정
+
+`community` Spring Boot 프로젝트에 태그·신고·알림·북마크 기능(Java 파일 25개)과 마이그레이션 V12~V17을 더 붙인 뒤, 마이그레이션 18개를 SchemaGuard로 돌려 결과를 사람이 읽어 보며 찾은 누락입니다. 이 기능은 `community` 저장소의 `test/schemaguard-complex` 브랜치에만 있습니다.
+
+**누락 1: 컨트롤러가 서비스를 여러 개 호출해도 첫 호출만 연결**
+
+- 문제: `ControllerParser`가 컨트롤러 메서드 안에서 처음 만난 서비스 호출 하나만 기록했습니다. 두 번째 이후 서비스에 깨지는 컬럼이 있어도 API가 결과에서 빠졌습니다.
+- 예: `PostController.postDetail`은 `postService.getPost(...)`, `commentService.getCommentsByPostId(...)` 순서로 호출합니다. `DROP TABLE comments`를 하면 상세 페이지 `GET /posts/{id}`가 깨지는데 결과에 없었습니다.
+- 변경: 메서드 안의 서비스 호출을 전부(같은 `서비스.메서드`는 한 번만) 기록합니다. `ControllerInfo.EndpointMapping`에 `serviceCalls` 목록을 추가했고, 기존 `calleeServiceClass` 등 필드는 첫 호출을 그대로 가리켜 호환됩니다. 그래프 빌더는 모든 호출에 컨트롤러→서비스 엣지를 만듭니다.
+
+**누락 2: 테이블 삭제/이름 변경이 FK로 참조하는 엔티티로 번지지 않음**
+
+- 문제: `DROP TABLE`, `RENAME TABLE`의 탐색 시작점이 "그 테이블의 컬럼과 그 테이블이 가진 FK 필드"뿐이었습니다. 다른 엔티티가 `@ManyToOne`으로 그 테이블을 참조하는 경우는 시작점이 아니었습니다.
+- 예: `tags`의 이름을 바꾸면 `Tag` 엔티티는 물론 `@ManyToOne Tag tag`를 가진 `PostTag`를 쓰는 API도 깨지는데, `PostTag`를 거치는 3개가 빠졌습니다.
+- 변경: `DependencyGraphBuilder`가 "테이블 → 그 테이블을 FK로 참조하는 FK 필드 노드" 색인(`getFkFieldsReferencingTable`)을 만듭니다. `ImpactAnalyzer`는 `DROP_TABLE`/`RENAME_TABLE`의 시작점에 이 노드를 추가합니다. 색인 없이 만든 기존 생성자도 그대로 동작합니다.
+
+**결과 (community, 마이그레이션 18개)**
+
+| 마이그레이션 | 영향 API 수 (수정 전 → 후) | 새로 잡힌 것 |
+|---|---|---|
+| V6 `DROP TABLE comments` | 3 → 4 | `GET /posts/{id}` (`PostController.postDetail`이 두 번째로 호출하는 `commentService`) |
+| V15 `RENAME TABLE tags TO hashtags` | 2 → 5 | `GET /api/tags/posts/{postId}`, `GET /api/tags/{name}/posts`, `POST /posts/{id}/delete` (모두 `PostTag` 경유) |
+| V0, V2, V3, V5, V7, V8, V9, V11 | 각각 1~3개 증가 | 첫 서비스 호출 뒤에 있던 서비스 경유 API |
+| V1, V4, V10, V12, V13, V14, V16, V17 | 변화 없음 | - |
+
+수정 전에 있던 결과가 사라진 경우는 없습니다(모든 마이그레이션에서 개수가 같거나 늘었습니다).
+
+**테스트**: `GraphPropagationTest`(신규, 6개)
+- 같은 서비스 호출은 한 번만 기록하고 서로 다른 호출은 모두 기록하는지
+- 두 번째 서비스의 컬럼 삭제로 API가 잡히는지
+- `RENAME TABLE`과 `DROP TABLE`이 FK 참조 엔티티의 API로 전파되는지 (색인 없는 기존 동작은 놓친다는 대조 포함)
+- 무관한 테이블 변경은 전파되지 않는지, 색인이 `tags → PostTag.tag`를 올바르게 만드는지
+
+**알려진 한계**
+
+- FK 전파는 `@ManyToOne` 같은 FK 어노테이션이 있는 필드만 대상입니다. `@OneToMany`(`@JoinColumn` 없음)와 `Long tagId`처럼 FK를 연관관계 없이 숫자로 들고 있는 경우는 찾지 못합니다.
+- 컨트롤러가 호출하는 서비스는 "필드로 선언된 서비스"로 한정됩니다. 지역 변수나 메서드 체이닝으로 얻은 서비스 호출은 여전히 놓칩니다.
+
+**관련 파일**: `ControllerInfo.java`, `ControllerParser.java`, `DependencyGraphBuilder.java`, `ImpactAnalyzer.java`, `SchemaGuardCLI.java`, `ParseBenchmark.java`, `GraphPropagationTest.java`(신규)
+
+---
+
 ## 6. Java 파일 중복 파싱 제거 (파일당 4회 → 1회)
 
 **문제**

@@ -9,10 +9,17 @@ public class ImpactAnalyzer {
 
     private final DefaultDirectedGraph<Node, Edge> graph;
     private final Map<String, Node> nodeIndex;
+    private final Map<String, List<Node>> fkFieldsReferencingTable;
 
     public ImpactAnalyzer(DefaultDirectedGraph<Node, Edge> graph, Map<String, Node> nodeIndex) {
+        this(graph, nodeIndex, Map.of());
+    }
+
+    public ImpactAnalyzer(DefaultDirectedGraph<Node, Edge> graph, Map<String, Node> nodeIndex,
+                          Map<String, List<Node>> fkFieldsReferencingTable) {
         this.graph     = graph;
         this.nodeIndex = nodeIndex;
+        this.fkFieldsReferencingTable = fkFieldsReferencingTable;
     }
 
 
@@ -42,6 +49,8 @@ public class ImpactAnalyzer {
                 List<Node> nodes = new ArrayList<>();
                 nodes.addAll(allColumnNodesOfTable(change.getTableName()));
                 nodes.addAll(allFkFieldNodesOfTable(change.getTableName()));
+                // 이 테이블을 FK로 참조하는 다른 엔티티(예: PostTag.tag → tags)도 깨진다.
+                nodes.addAll(fkFieldsReferencingTable.getOrDefault(change.getTableName(), List.of()));
                 yield nodes;
             }
 

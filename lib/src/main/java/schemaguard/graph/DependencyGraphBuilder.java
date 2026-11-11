@@ -4,6 +4,7 @@ import schemaguard.model.*;
 import org.jgrapht.graph.DefaultDirectedGraph;
 
 import java.io.File;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -20,6 +21,12 @@ public class DependencyGraphBuilder {
     private final DefaultDirectedGraph<Node, Edge> graph =
             new DefaultDirectedGraph<>(Edge.class);
     private final Map<String, Node> nodeIndex = new HashMap<>();
+
+    /**
+     * 테이블명 → 그 테이블을 FK로 참조하는 다른 엔티티의 FK 필드 노드.
+     * 예) tags → [PostTag.tag]. 테이블 삭제/이름 변경이 참조하는 쪽 API까지 번지게 하는 데 쓴다.
+     */
+    private final Map<String, List<Node>> fkFieldsReferencingTable = new HashMap<>();
 
     /** CLI 에서 전달받는 --source 경로 (src/main/java 의 부모 또는 그 자체) */
     private String sourceRoot = "";
@@ -39,6 +46,7 @@ public class DependencyGraphBuilder {
 
         addEntityEdges(entities);
         addFkEdges(fkMappings);
+        indexFkReferences(entities, fkMappings);
         addRepositoryEdges(repos, entities, fkMappings);
         addServiceEdges(services);
         addControllerEdges(controllers);
@@ -47,6 +55,7 @@ public class DependencyGraphBuilder {
 
     public DefaultDirectedGraph<Node, Edge> getGraph() { return graph; }
     public Map<String, Node> getNodeIndex()            { return nodeIndex; }
+    public Map<String, List<Node>> getFkFieldsReferencingTable() { return fkFieldsReferencingTable; }
 
     // ── 1단계: 일반 Entity Field → Column ────────────────────────────────────
 
@@ -72,6 +81,22 @@ public class DependencyGraphBuilder {
             Node column  = getOrCreate(fk.getColumnNodeId(), NodeType.COLUMN,
                     fk.getTableName() + "." + fk.getJoinColumnName(), null, -1);
             addEdge(fkField, column, RelationType.FK_MAPS);
+        }
+    }
+
+    /** FK 필드가 참조하는 엔티티 → 그 엔티티의 테이블을 찾아 "테이블 → 참조하는 FK 필드" 색인을 만든다. */
+    private void indexFkReferences(List<EntityMapping> entities, List<FkMapping> fkMappings) {
+        Map<String, String> tableOfEntity = new HashMap<>();
+        for (EntityMapping em : entities) tableOfEntity.putIfAbsent(em.getEntityClass(), em.getTableName());
+        for (FkMapping fk : fkMappings)   tableOfEntity.putIfAbsent(fk.getEntityClass(), fk.getTableName());
+
+        for (FkMapping fk : fkMappings) {
+            String referencedTable = tableOfEntity.get(fk.getReferencedEntity());
+            Node fkNode = nodeIndex.get(fk.getFkFieldNodeId());
+            if (referencedTable == null || fkNode == null) continue;
+
+            List<Node> list = fkFieldsReferencingTable.computeIfAbsent(referencedTable, t -> new ArrayList<>());
+            if (!list.contains(fkNode)) list.add(fkNode);
         }
     }
 
@@ -161,12 +186,12 @@ public class DependencyGraphBuilder {
 
                 addEdge(apiNode, ctrlNode, RelationType.MAPS);
 
-                if (ep.calleeServiceClass != null && ep.calleeServiceMethod != null) {
+                for (ControllerInfo.ServiceCall call : ep.serviceCalls) {
                     Node svcNode = getOrCreate(
-                            "svc:" + ep.calleeServiceClass + "." + ep.calleeServiceMethod,
+                            "svc:" + call.serviceClass() + "." + call.serviceMethod(),
                             NodeType.SERVICE,
-                            ep.calleeServiceClass + "." + ep.calleeServiceMethod,
-                            null, ep.serviceCallLine);
+                            call.serviceClass() + "." + call.serviceMethod(),
+                            null, call.line());
                     addEdge(ctrlNode, svcNode, RelationType.CALLS);
                 }
             }

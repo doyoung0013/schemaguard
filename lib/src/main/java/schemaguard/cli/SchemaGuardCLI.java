@@ -126,7 +126,8 @@ public class SchemaGuardCLI implements Callable<Integer> {
                 scan.services(), scan.controllers());
         long t3 = System.nanoTime();
 
-        ImpactAnalyzer analyzer = new ImpactAnalyzer(builder.getGraph(), builder.getNodeIndex());
+        ImpactAnalyzer analyzer = new ImpactAnalyzer(builder.getGraph(), builder.getNodeIndex(),
+                builder.getFkFieldsReferencingTable());
         ImpactResult result = analyzer.analyze(changes);
         long t4 = System.nanoTime();
 

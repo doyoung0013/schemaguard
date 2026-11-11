@@ -58,21 +58,19 @@ public class ControllerParser {
                     String httpMethod = ANNOTATION_TO_HTTP.getOrDefault(ann.getNameAsString(), "GET");
                     String fullPath   = normalizePath(prefix + extractPath(ann));
 
-                    String svcClass = null, svcMethod = null;
-                    int    svcLine  = -1;
+                    // 메서드 안의 서비스 호출을 전부 모은다 (같은 서비스 메서드는 한 번만).
+                    // 이전에는 첫 호출만 연결해서, 두 번째 이후 서비스가 깨져도 API가 누락되었다.
+                    Map<String, ControllerInfo.ServiceCall> calls = new LinkedHashMap<>();
                     for (MethodCallExpr call : method.findAll(MethodCallExpr.class)) {
-                        if (call.getScope().isPresent()) {
-                            String type = ftm.get(call.getScope().get().toString());
-                            if (type != null) {
-                                svcClass  = type;
-                                svcMethod = call.getNameAsString();
-                                svcLine   = call.getRange().map(r -> r.begin.line).orElse(methodLine);
-                                break;
-                            }
-                        }
+                        if (call.getScope().isEmpty()) continue;
+                        String type = ftm.get(call.getScope().get().toString());
+                        if (type == null) continue;
+                        int line = call.getRange().map(r -> r.begin.line).orElse(methodLine);
+                        calls.putIfAbsent(type + "." + call.getNameAsString(),
+                                new ControllerInfo.ServiceCall(type, call.getNameAsString(), line));
                     }
                     info.addEndpoint(httpMethod, fullPath, method.getNameAsString(), methodLine,
-                            svcClass, svcMethod, svcLine);
+                            new ArrayList<>(calls.values()));
                 }
             }
             result.add(info);
