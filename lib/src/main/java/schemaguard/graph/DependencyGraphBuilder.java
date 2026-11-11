@@ -29,6 +29,12 @@ public class DependencyGraphBuilder {
      */
     private final Map<String, List<Node>> fkFieldsReferencingTable = new HashMap<>();
 
+    /**
+     * 테이블명 → 그 테이블의 엔티티를 저장하는 Repository 메서드 노드 (save, saveAll, saveAndFlush ...).
+     * NOT NULL/UNIQUE 추가, 길이 축소, FK 참조 변경처럼 "쓰기만 실패하는" 변경의 시작점이다.
+     */
+    private final Map<String, List<Node>> writeMethodsByTable = new HashMap<>();
+
     /** CLI 에서 전달받는 --source 경로 (src/main/java 의 부모 또는 그 자체) */
     private String sourceRoot = "";
 
@@ -52,12 +58,37 @@ public class DependencyGraphBuilder {
         addServiceEdges(services);
         addControllerEdges(controllers);
         addAssociationLoadEdges(entities, fkMappings, repos, services);
+        indexWriteMethods(entities, fkMappings, repos);
         return graph;
     }
 
     public DefaultDirectedGraph<Node, Edge> getGraph() { return graph; }
     public Map<String, Node> getNodeIndex()            { return nodeIndex; }
     public Map<String, List<Node>> getFkFieldsReferencingTable() { return fkFieldsReferencingTable; }
+    public Map<String, List<Node>> getWriteMethodsByTable()      { return writeMethodsByTable; }
+
+    /** 그래프가 다 만들어진 뒤, 서비스가 호출하는 save* 메서드(선언/기본/상속)까지 포함해 색인한다. */
+    private void indexWriteMethods(List<EntityMapping> entities, List<FkMapping> fkMappings,
+                                   List<RepositoryInfo> repos) {
+        Map<String, String> tableOfEntity = new HashMap<>();
+        for (EntityMapping em : entities) tableOfEntity.putIfAbsent(em.getEntityClass(), em.getTableName());
+        for (FkMapping fk : fkMappings)   tableOfEntity.putIfAbsent(fk.getEntityClass(), fk.getTableName());
+
+        // 리포지토리 클래스명 → 테이블. nodeIndex 는 한 번만 훑는다 (리포지토리마다 훑으면 리포지토리 수 × 노드 수).
+        Map<String, String> tableOfRepo = new HashMap<>();
+        for (RepositoryInfo repo : repos) {
+            String table = tableOfEntity.get(repo.getEntityClass());
+            if (table != null) tableOfRepo.putIfAbsent(repo.getClassName(), table);
+        }
+        for (Map.Entry<String, Node> e : nodeIndex.entrySet()) {
+            String id = e.getKey();                              // "repo:<Repository>.<method>"
+            if (!id.startsWith("repo:")) continue;
+            int dot = id.indexOf('.', 5);
+            if (dot < 0 || !id.startsWith(".save", dot)) continue;
+            String table = tableOfRepo.get(id.substring(5, dot));
+            if (table != null) writeMethodsByTable.computeIfAbsent(table, t -> new ArrayList<>()).add(e.getValue());
+        }
+    }
 
     // ── 1단계: 일반 Entity Field → Column ────────────────────────────────────
 

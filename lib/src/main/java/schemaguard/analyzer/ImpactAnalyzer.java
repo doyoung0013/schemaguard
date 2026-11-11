@@ -10,6 +10,7 @@ public class ImpactAnalyzer {
     private final DefaultDirectedGraph<Node, Edge> graph;
     private final Map<String, Node> nodeIndex;
     private final Map<String, List<Node>> fkFieldsReferencingTable;
+    private final Map<String, List<Node>> writeMethodsByTable;
 
     /**
      * 테이블명 → 그 테이블의 컬럼 노드. 처음 필요할 때 nodeIndex를 한 번만 훑어 만든다.
@@ -24,9 +25,22 @@ public class ImpactAnalyzer {
 
     public ImpactAnalyzer(DefaultDirectedGraph<Node, Edge> graph, Map<String, Node> nodeIndex,
                           Map<String, List<Node>> fkFieldsReferencingTable) {
+        this(graph, nodeIndex, fkFieldsReferencingTable, Map.of());
+    }
+
+    public ImpactAnalyzer(DefaultDirectedGraph<Node, Edge> graph, Map<String, Node> nodeIndex,
+                          Map<String, List<Node>> fkFieldsReferencingTable,
+                          Map<String, List<Node>> writeMethodsByTable) {
         this.graph     = graph;
         this.nodeIndex = nodeIndex;
         this.fkFieldsReferencingTable = fkFieldsReferencingTable;
+        this.writeMethodsByTable = writeMethodsByTable;
+    }
+
+    /** 그래프 빌더가 만든 색인을 모두 사용하는 분석기. */
+    public static ImpactAnalyzer of(schemaguard.graph.DependencyGraphBuilder b) {
+        return new ImpactAnalyzer(b.getGraph(), b.getNodeIndex(),
+                b.getFkFieldsReferencingTable(), b.getWriteMethodsByTable());
     }
 
 
@@ -36,19 +50,47 @@ public class ImpactAnalyzer {
         for (SchemaChange change : changes) {
             if (change.getChangeType() == ChangeType.ADD_COLUMN) continue;
 
+            // 쓰기 경로는 save 메서드에서 시작한다. 왜 그 메서드인지 보이도록 경로 맨 앞에 대상 컬럼을 붙인다.
+            Node writeTarget = isWriteScope(change)
+                    ? nodeIndex.get("col:" + change.getTableName() + "." + change.getColumnName()) : null;
+
             for (Node start : sortedDistinct(resolveStartNodes(change))) {
-                result.addAll(bfs(start, change));
+                for (AffectedApi api : bfs(start, change)) {
+                    if (writeTarget != null) {
+                        List<Node> path = new ArrayList<>();
+                        path.add(writeTarget);
+                        path.addAll(api.getImpactNodes());
+                        api = new AffectedApi(api.getApiId(), api.getRiskLevel(), api.getCause(), path);
+                    }
+                    result.add(api);
+                }
             }
         }
         return new ImpactResult(deduplicate(result));
+    }
+
+    private static boolean isWriteScope(SchemaChange change) {
+        return switch (change.getChangeType()) {
+            case ADD_NOT_NULL, ADD_UNIQUE, NARROW_COLUMN, ADD_FOREIGN_KEY, MODIFY_FK_REFERENCE -> true;
+            default -> false;
+        };
     }
 
 
     private List<Node> resolveStartNodes(SchemaChange change) {
         return switch (change.getChangeType()) {
 
-            case DROP_COLUMN, RENAME_COLUMN, DROP_FK_COLUMN, MODIFY_TYPE, ADD_NOT_NULL, ADD_UNIQUE ->
+            // 읽기가 깨지는 변경: 그 컬럼을 읽는 모든 경로
+            case DROP_COLUMN, RENAME_COLUMN, DROP_FK_COLUMN, MODIFY_TYPE ->
                     columnNodes(change.getTableName(), change.getColumnName());
+
+            // 쓰기만 실패하는 변경: 그 테이블의 엔티티를 저장하는 경로만.
+            //   NOT NULL/UNIQUE 추가, 길이·범위 축소, FK 추가·참조 변경은 기존 값을 읽는 데는 영향이 없다.
+            case ADD_NOT_NULL, ADD_UNIQUE, NARROW_COLUMN, ADD_FOREIGN_KEY, MODIFY_FK_REFERENCE ->
+                    writeMethodsByTable.getOrDefault(change.getTableName(), List.of());
+
+            // 영향 없음: FK 제약 삭제(무결성만 약해짐), 엔티티와 호환되는 타입 변경, 컬럼 추가
+            case DROP_FOREIGN_KEY, MODIFY_COMPATIBLE, ADD_COLUMN -> List.of();
 
             // 테이블명 변경은 @Table 매핑이 그대로면 테이블 삭제와 같은 범위가 깨진다.
             case DROP_TABLE, RENAME_TABLE -> {
@@ -59,20 +101,6 @@ public class ImpactAnalyzer {
                 nodes.addAll(fkFieldsReferencingTable.getOrDefault(change.getTableName(), List.of()));
                 yield nodes;
             }
-
-            case DROP_FOREIGN_KEY ->
-                    allFkFieldNodesOfTable(change.getTableName());
-
-            case MODIFY_FK_REFERENCE -> {
-                List<Node> nodes = new ArrayList<>();
-                nodes.addAll(allFkFieldNodesOfTable(change.getTableName()));
-                if (change.getReferencedTable() != null)
-                    nodes.addAll(allColumnNodesOfTable(change.getReferencedTable()));
-                yield nodes;
-            }
-
-            case ADD_FOREIGN_KEY ->
-                    columnNodes(change.getTableName(), change.getColumnName());
 
             default -> List.of();
         };

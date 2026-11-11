@@ -85,7 +85,10 @@ public class EntityParser {
                             .orElse(toSnakeCase(fieldName));
                     entityMappings.add(new EntityMapping(
                             className, fieldName, tableName, columnName,
-                            filePath, line));               // ← 위치 정보
+                            filePath, line,                 // ← 위치 정보
+                            effectiveJavaType(field),
+                            getAnnotationValue(field, "Column", "length").map(EntityParser::parseIntOrNull).orElse(null),
+                            isNullable(field)));
                 }
             }
         });
@@ -109,6 +112,27 @@ public class EntityParser {
                 .map(AnnotationExpr::getNameAsString)
                 .filter(FK_ANNOTATIONS::contains)
                 .findFirst().orElse("Unknown");
+    }
+
+    /** DB 에 저장되는 값 기준의 Java 타입. @Enumerated(STRING) → String, @Enumerated(ORDINAL/기본) → Integer. */
+    private String effectiveJavaType(FieldDeclaration field) {
+        String raw = field.getElementType().asString().replaceAll("<.*>", "").trim();
+        if (hasAnnotation(field, "Enumerated")) {
+            boolean string = field.getAnnotationByName("Enumerated")
+                    .map(a -> a.toString().contains("STRING")).orElse(false);
+            return string ? "String" : "Integer";
+        }
+        return raw;
+    }
+
+    /** 애플리케이션이 이 컬럼에 NULL 을 쓸 수 있는지. 기본형, @Id, @Column(nullable = false) 이면 쓸 수 없다. */
+    private boolean isNullable(FieldDeclaration field) {
+        if (field.getElementType().isPrimitiveType() || hasAnnotation(field, "Id")) return false;
+        return getAnnotationValue(field, "Column", "nullable").map(v -> !v.trim().equals("false")).orElse(true);
+    }
+
+    private static Integer parseIntOrNull(String s) {
+        try { return Integer.parseInt(s.trim()); } catch (NumberFormatException e) { return null; }
     }
 
     /** fetch = FetchType.LAZY/EAGER 를 읽고, 없으면 JPA 기본값을 쓴다. */

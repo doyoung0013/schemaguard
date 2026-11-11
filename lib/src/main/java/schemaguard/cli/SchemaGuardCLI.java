@@ -1,5 +1,6 @@
 package schemaguard.cli;
 
+import schemaguard.analyzer.ChangeClassifier;
 import schemaguard.analyzer.ImpactAnalyzer;
 import schemaguard.graph.DependencyGraphBuilder;
 import schemaguard.model.*;
@@ -78,6 +79,7 @@ public class SchemaGuardCLI implements Callable<Integer> {
 
             List<String> sourceParseFailures = new ArrayList<>();
             ImpactResult result;
+            MigrationParser.ParseResult reported = parsed;
 
             if (changes.isEmpty()) {
                 System.out.println("No schema changes detected in migration file.");
@@ -86,11 +88,14 @@ public class SchemaGuardCLI implements Callable<Integer> {
                 System.out.println("Detected " + changes.size() + " schema change(s):");
                 changes.forEach(c -> System.out.println("  " + c));
                 System.out.println();
-                result = analyze(changes, sourceParseFailures);
+                List<SchemaChange> classified = new ArrayList<>();
+                result = analyze(changes, sourceParseFailures, classified);
+                // 리포트의 detectedChanges 는 엔티티 매핑과 비교해 재분류한 결과를 보여준다.
+                reported = new MigrationParser.ParseResult(classified, parsed.failures(), parsed.totalStatements());
             }
 
             // 변경이 없어도 리포트는 항상 만든다. CI가 리포트 파일 유무로 헷갈리지 않도록.
-            for (ReportGenerator reporter : reporters(parsed, sourceParseFailures)) {
+            for (ReportGenerator reporter : reporters(reported, sourceParseFailures)) {
                 reporter.generate(result);
             }
 
@@ -103,7 +108,8 @@ public class SchemaGuardCLI implements Callable<Integer> {
         }
     }
 
-    private ImpactResult analyze(List<SchemaChange> changes, List<String> sourceParseFailures) {
+    private ImpactResult analyze(List<SchemaChange> changes, List<String> sourceParseFailures,
+                                 List<SchemaChange> classifiedOut) {
         long t0 = System.nanoTime();
         List<File> javaFiles = SourceScanner.collectJavaFiles(new File(sourcePath));
         long t1 = System.nanoTime();
@@ -127,9 +133,12 @@ public class SchemaGuardCLI implements Callable<Integer> {
                 scan.services(), scan.controllers());
         long t3 = System.nanoTime();
 
-        ImpactAnalyzer analyzer = new ImpactAnalyzer(builder.getGraph(), builder.getNodeIndex(),
-                builder.getFkFieldsReferencingTable());
-        ImpactResult result = analyzer.analyze(changes);
+        // SQL 만 보고 정한 분류를 코드(엔티티 매핑)가 기대하는 스키마와 비교해 다시 정한다.
+        List<SchemaChange> classified = new ChangeClassifier().classify(changes, scan.entities(), scan.fkMappings());
+        classifiedOut.addAll(classified);
+        printReclassified(changes, classified);
+
+        ImpactResult result = ImpactAnalyzer.of(builder).analyze(classified);
         long t4 = System.nanoTime();
 
         if (timing) {
@@ -150,6 +159,17 @@ public class SchemaGuardCLI implements Callable<Integer> {
         }
         out.sort(null);
         return out;
+    }
+
+    private static void printReclassified(List<SchemaChange> before, List<SchemaChange> after) {
+        List<SchemaChange> changed = after.stream().filter(c -> c.getNote() != null).toList();
+        if (changed.isEmpty()) return;
+        System.out.println("Reclassified against entity mappings:");
+        for (SchemaChange c : changed) {
+            System.out.println("  " + c);
+            System.out.println("      " + c.getNote());
+        }
+        System.out.println();
     }
 
     private static double ms(long nanos) {

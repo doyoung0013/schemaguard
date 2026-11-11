@@ -16,6 +16,28 @@ public class SchemaChange {
     private final String fkName;            // ex. "fk_post_author"  (없으면 null)
     private final String referencedTable;   // ex. "users"           (없으면 null)
     private final String referencedColumn;  // ex. "id"              (없으면 null)
+
+    // 컬럼 정의 (MODIFY / ALTER TYPE / ADD COLUMN 일 때만, 없으면 null)
+    private ColumnDef columnDef;
+    // 재분류 근거 등 사람이 읽을 설명 (없으면 null)
+    private String note;
+
+    /**
+     * SQL 컬럼 정의. 예) VARCHAR(50) NOT NULL → dataType "VARCHAR", args [50], notNull true
+     */
+    public record ColumnDef(String dataType, java.util.List<String> args, boolean notNull, boolean hasDefault) {
+        public ColumnDef {
+            dataType = dataType == null ? "" : dataType.toUpperCase();
+            args = args == null ? java.util.List.of() : java.util.List.copyOf(args);
+        }
+        public Integer firstArgAsInt() {
+            if (args.isEmpty()) return null;
+            try { return Integer.parseInt(args.get(0).trim()); } catch (NumberFormatException e) { return null; }
+        }
+        @Override public String toString() {
+            return dataType + (args.isEmpty() ? "" : "(" + String.join(",", args) + ")") + (notNull ? " NOT NULL" : "");
+        }
+    }
  
     // ── 기본 생성자 (non-FK) ──────────────────────────────────────────────────
  
@@ -53,6 +75,30 @@ public class SchemaChange {
     public String getReferencedTable()   { return referencedTable; }
     public String getReferencedColumn()  { return referencedColumn; }
  
+    public ColumnDef getColumnDef() { return columnDef; }
+    public String getNote()         { return note; }
+
+    public SchemaChange withColumnDef(ColumnDef def) {
+        SchemaChange c = copy(changeType, riskLevel);
+        c.columnDef = def;
+        return c;
+    }
+
+    /** 같은 대상에 대해 변경 종류/위험도만 바꾼 사본을 만든다 (재분류용). */
+    public SchemaChange reclassify(ChangeType type, RiskLevel risk, String note) {
+        SchemaChange c = copy(type, risk);
+        c.note = note;
+        return c;
+    }
+
+    private SchemaChange copy(ChangeType type, RiskLevel risk) {
+        SchemaChange c = new SchemaChange(tableName, columnName, newName, type, risk,
+                fkName, referencedTable, referencedColumn);
+        c.columnDef = columnDef;
+        c.note = note;
+        return c;
+    }
+
     public boolean isFkChange() {
         return changeType == ChangeType.DROP_FOREIGN_KEY
             || changeType == ChangeType.DROP_FK_COLUMN

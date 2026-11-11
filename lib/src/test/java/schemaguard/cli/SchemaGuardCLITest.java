@@ -48,6 +48,7 @@ class SchemaGuardCLITest {
                 public class UserService {
                     private UserRepository userRepository;
                     public User getByEmail(String e) { return userRepository.findByEmail(e); }
+                    public User signup(User u) { return userRepository.save(u); }
                 }
                 """);
         write("com/example/UserController.java", """
@@ -57,6 +58,8 @@ class SchemaGuardCLITest {
                     private UserService userService;
                     @GetMapping("/me")
                     public User me() { return userService.getByEmail("x"); }
+                    @PostMapping("/signup")
+                    public User signup() { return userService.signup(null); }
                 }
                 """);
     }
@@ -143,7 +146,7 @@ class SchemaGuardCLITest {
     }
 
     @Test
-    void setNotNullReachesApiAsMediumRisk() throws IOException {
+    void setNotNullReachesOnlyWritePathAsMediumRisk() throws IOException {
         Path report = tmp.resolve("report.json");
 
         int code = run(sql("ALTER TABLE users ALTER COLUMN email SET NOT NULL;"),
@@ -151,8 +154,61 @@ class SchemaGuardCLITest {
 
         assertEquals(SchemaGuardCLI.EXIT_OK, code);   // MEDIUM은 차단하지 않는다
         JsonNode json = readJson(report);
+        // NOT NULL 은 읽기(GET /me)를 깨지 않는다. NULL 을 저장할 수 있는 쓰기 경로만 영향.
         assertEquals(1, json.at("/summary/medium").asInt());
+        assertEquals("POST /signup", json.at("/affectedApis/0/apiId").asText());
         assertEquals("ADD_NOT_NULL", json.at("/affectedApis/0/cause/type").asText());
+        assertEquals("col:users.email", json.at("/affectedApis/0/impactPath/0/id").asText());
+        assertEquals("repo:UserRepository.save", json.at("/affectedApis/0/impactPath/1/id").asText());
+    }
+
+    @Test
+    void modifyCompatibleWithEntityMappingHasNoImpact() throws IOException {
+        Path report = tmp.resolve("report.json");
+
+        // 엔티티는 String email (length 기본 255, nullable). 같은 길이로 바꾸는 MODIFY 는 영향 없음.
+        int code = run(sql("ALTER TABLE users MODIFY email VARCHAR(255);"), "--report-path", report.toString());
+
+        assertEquals(SchemaGuardCLI.EXIT_OK, code);
+        JsonNode json = readJson(report);
+        assertEquals(0, json.at("/affectedApis").size());
+        assertEquals("[LOW] MODIFY_COMPATIBLE on users.email", json.at("/parse/detectedChanges/0").asText());
+    }
+
+    @Test
+    void narrowingColumnIsMediumOnWritePathWithNote() throws IOException {
+        Path report = tmp.resolve("report.json");
+
+        int code = run(sql("ALTER TABLE users MODIFY email VARCHAR(20);"), "--report-path", report.toString());
+
+        assertEquals(SchemaGuardCLI.EXIT_OK, code);
+        JsonNode json = readJson(report);
+        assertEquals("POST /signup", json.at("/affectedApis/0/apiId").asText());
+        assertEquals("NARROW_COLUMN", json.at("/affectedApis/0/cause/type").asText());
+        assertTrue(json.at("/affectedApis/0/cause/note").asText().contains("21~255"));
+    }
+
+    @Test
+    void incompatibleTypeChangeStaysHighOnReadPath() throws IOException {
+        Path report = tmp.resolve("report.json");
+
+        int code = run(sql("ALTER TABLE users MODIFY email INT;"), "--report-path", report.toString());
+
+        assertEquals(SchemaGuardCLI.EXIT_HIGH_RISK, code);
+        JsonNode json = readJson(report);
+        assertEquals("GET /me", json.at("/affectedApis/0/apiId").asText());
+        assertEquals("MODIFY_TYPE", json.at("/affectedApis/0/cause/type").asText());
+    }
+
+    @Test
+    void droppingForeignKeyConstraintDoesNotBlock() throws IOException {
+        Path report = tmp.resolve("report.json");
+
+        int code = run(sql("ALTER TABLE users DROP FOREIGN KEY fk_users_team;"), "--report-path", report.toString());
+
+        assertEquals(SchemaGuardCLI.EXIT_OK, code);    // 제약만 사라짐: 쿼리는 깨지지 않는다
+        JsonNode json = readJson(report);
+        assertEquals(0, json.at("/affectedApis").size());
     }
 
     @Test

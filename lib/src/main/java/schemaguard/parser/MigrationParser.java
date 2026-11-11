@@ -102,7 +102,8 @@ public class MigrationParser {
                     null,
                     null,
                     ChangeType.DROP_FOREIGN_KEY,
-                    RiskLevel.HIGH,
+                    // 제약만 사라진다. 기존 쿼리는 깨지지 않고, 이후 참조 무결성을 DB가 보장하지 않을 뿐이다.
+                    RiskLevel.LOW,
                     ident(dropFk.group(2)),
                     null,
                     null
@@ -253,7 +254,8 @@ public class MigrationParser {
                                 add.getColumnName(),
                                 null,
                                 ChangeType.MODIFY_FK_REFERENCE,
-                                RiskLevel.HIGH,
+                                // 읽기는 그대로 동작한다. 새 참조 대상에 없는 값을 쓰는 INSERT/UPDATE 만 실패한다.
+                                RiskLevel.MEDIUM,
                                 add.getFkName(),
                                 add.getReferencedTable(),
                                 add.getReferencedColumn()
@@ -323,22 +325,23 @@ public class MigrationParser {
                     if (norm.contains(" SET NOT NULL ")) {
                         result.add(new SchemaChange(table, col, ChangeType.ADD_NOT_NULL, RiskLevel.MEDIUM));
                     } else if (norm.contains(" SET DATA TYPE ") || norm.contains(" TYPE ")) {
-                        result.add(new SchemaChange(table, col, ChangeType.MODIFY_TYPE, RiskLevel.HIGH));
+                        result.add(new SchemaChange(table, col, ChangeType.MODIFY_TYPE, RiskLevel.HIGH)
+                                .withColumnDef(columnDef(expr.getColDataTypeList().get(0))));
                     }
                 }
 
                 case "MODIFY", "CHANGE" -> {
                     if (expr.getColDataTypeList() != null && !expr.getColDataTypeList().isEmpty()) {
-                        String col = ident(expr.getColDataTypeList()
-                                .get(0)
-                                .getColumnName());
+                        AlterExpression.ColumnDataType cdt = expr.getColDataTypeList().get(0);
+                        String col = ident(cdt.getColumnName());
 
+                        // 최종 분류(호환/축소/NOT NULL/비호환)는 엔티티 매핑과 비교하는 ChangeClassifier 가 한다.
                         result.add(new SchemaChange(
                                 table,
                                 col,
                                 ChangeType.MODIFY_TYPE,
                                 RiskLevel.HIGH
-                        ));
+                        ).withColumnDef(columnDef(cdt)));
                     }
                 }
 
@@ -350,7 +353,8 @@ public class MigrationParser {
                                 ChangeType.ADD_UNIQUE,
                                 RiskLevel.MEDIUM
                         ));
-                    } else if (exprStr.contains("NOT NULL")) {
+                    } else if (exprStr.contains("NOT NULL") && !exprStr.contains("DEFAULT")) {
+                        // DEFAULT 없는 NOT NULL 컬럼 추가: 엔티티가 모르는 컬럼이라 INSERT 에서 값이 빠져 실패한다.
                         result.add(new SchemaChange(
                                 table,
                                 extractFirstColumnName(expr),
@@ -399,11 +403,26 @@ public class MigrationParser {
         return FK_COLUMN_SUFFIX.matcher(columnName).matches();
     }
 
+    private static SchemaChange.ColumnDef columnDef(AlterExpression.ColumnDataType cdt) {
+        String specs = cdt.getColumnSpecs() == null ? "" : String.join(" ", cdt.getColumnSpecs()).toUpperCase();
+        boolean notNull = (" " + specs.replaceAll("\\s+", " ") + " ").contains(" NOT NULL ");
+        return new SchemaChange.ColumnDef(
+                cdt.getColDataType().getDataType(),
+                cdt.getColDataType().getArgumentsStringList(),
+                notNull,
+                specs.contains("DEFAULT"));
+    }
+
     private String extractFirstColumnName(AlterExpression expr) {
         if (expr.getColDataTypeList() != null && !expr.getColDataTypeList().isEmpty()) {
             return ident(expr.getColDataTypeList()
                     .get(0)
                     .getColumnName());
+        }
+        // ADD CONSTRAINT uq UNIQUE (a, b) 처럼 인덱스로 온 경우 첫 컬럼
+        if (expr.getIndex() != null && expr.getIndex().getColumnsNames() != null
+                && !expr.getIndex().getColumnsNames().isEmpty()) {
+            return ident(expr.getIndex().getColumnsNames().get(0));
         }
 
         return "unknown";

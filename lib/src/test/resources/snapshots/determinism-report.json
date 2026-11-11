@@ -1,7 +1,7 @@
 {
   "summary" : {
     "high" : 8,
-    "medium" : 3,
+    "medium" : 0,
     "low" : 0,
     "hasHighRisk" : true,
     "parseFailures" : 0,
@@ -24,7 +24,9 @@
       "column" : "email",
       "fkName" : null,
       "referencedTable" : null,
-      "referencedColumn" : null
+      "referencedColumn" : null,
+      "newDefinition" : null,
+      "note" : null
     },
     "isFkChange" : false,
     "impactPath" : [ {
@@ -73,7 +75,9 @@
       "column" : null,
       "fkName" : null,
       "referencedTable" : null,
-      "referencedColumn" : null
+      "referencedColumn" : null,
+      "newDefinition" : null,
+      "note" : null
     },
     "isFkChange" : false,
     "impactPath" : [ {
@@ -122,7 +126,9 @@
       "column" : "email",
       "fkName" : null,
       "referencedTable" : null,
-      "referencedColumn" : null
+      "referencedColumn" : null,
+      "newDefinition" : null,
+      "note" : null
     },
     "isFkChange" : false,
     "impactPath" : [ {
@@ -171,7 +177,9 @@
       "column" : null,
       "fkName" : null,
       "referencedTable" : null,
-      "referencedColumn" : null
+      "referencedColumn" : null,
+      "newDefinition" : null,
+      "note" : null
     },
     "isFkChange" : false,
     "impactPath" : [ {
@@ -220,7 +228,9 @@
       "column" : "email",
       "fkName" : null,
       "referencedTable" : null,
-      "referencedColumn" : null
+      "referencedColumn" : null,
+      "newDefinition" : null,
+      "note" : null
     },
     "isFkChange" : false,
     "impactPath" : [ {
@@ -269,7 +279,9 @@
       "column" : null,
       "fkName" : null,
       "referencedTable" : null,
-      "referencedColumn" : null
+      "referencedColumn" : null,
+      "newDefinition" : null,
+      "note" : null
     },
     "isFkChange" : false,
     "impactPath" : [ {
@@ -312,7 +324,9 @@
       "column" : "email",
       "fkName" : null,
       "referencedTable" : null,
-      "referencedColumn" : null
+      "referencedColumn" : null,
+      "newDefinition" : null,
+      "note" : null
     },
     "isFkChange" : false,
     "impactPath" : [ {
@@ -361,7 +375,9 @@
       "column" : null,
       "fkName" : null,
       "referencedTable" : null,
-      "referencedColumn" : null
+      "referencedColumn" : null,
+      "newDefinition" : null,
+      "note" : null
     },
     "isFkChange" : false,
     "impactPath" : [ {
@@ -376,153 +392,6 @@
       "name" : "User.email",
       "filePath" : "com/example/user/User.java",
       "line" : 6
-    }, {
-      "id" : "repo:UserRepository.findByNickname",
-      "type" : "REPOSITORY",
-      "name" : "UserRepository.findByNickname",
-      "filePath" : "com/example/user/UserRepository.java",
-      "line" : 4
-    }, {
-      "id" : "svc:UserService.getByNickname",
-      "type" : "SERVICE",
-      "name" : "UserService.getByNickname",
-      "filePath" : "com/example/user/UserService.java",
-      "line" : 10
-    }, {
-      "id" : "ctrl:UserController.byNickname",
-      "type" : "CONTROLLER",
-      "name" : "UserController.byNickname",
-      "filePath" : "com/example/user/UserController.java",
-      "line" : 7
-    }, {
-      "id" : "api:GET /users/by-nickname",
-      "type" : "API",
-      "name" : "GET /users/by-nickname",
-      "filePath" : null,
-      "line" : null
-    } ]
-  }, {
-    "apiId" : "GET /admin/users",
-    "riskLevel" : "MEDIUM",
-    "cause" : {
-      "type" : "ADD_NOT_NULL",
-      "table" : "users",
-      "column" : "nickname",
-      "fkName" : null,
-      "referencedTable" : null,
-      "referencedColumn" : null
-    },
-    "isFkChange" : false,
-    "impactPath" : [ {
-      "id" : "col:users.nickname",
-      "type" : "COLUMN",
-      "name" : "users.nickname",
-      "filePath" : null,
-      "line" : null
-    }, {
-      "id" : "field:User.nickname",
-      "type" : "FIELD",
-      "name" : "User.nickname",
-      "filePath" : "com/example/user/User.java",
-      "line" : 7
-    }, {
-      "id" : "repo:UserRepository.findByEmail",
-      "type" : "REPOSITORY",
-      "name" : "UserRepository.findByEmail",
-      "filePath" : "com/example/user/UserRepository.java",
-      "line" : 3
-    }, {
-      "id" : "svc:AuditService.record",
-      "type" : "SERVICE",
-      "name" : "AuditService.record",
-      "filePath" : "com/example/user/AuditService.java",
-      "line" : 5
-    }, {
-      "id" : "ctrl:AdminController.users",
-      "type" : "CONTROLLER",
-      "name" : "AdminController.users",
-      "filePath" : "com/example/admin/AdminController.java",
-      "line" : 6
-    }, {
-      "id" : "api:GET /admin/users",
-      "type" : "API",
-      "name" : "GET /admin/users",
-      "filePath" : null,
-      "line" : null
-    } ]
-  }, {
-    "apiId" : "GET /me",
-    "riskLevel" : "MEDIUM",
-    "cause" : {
-      "type" : "ADD_NOT_NULL",
-      "table" : "users",
-      "column" : "nickname",
-      "fkName" : null,
-      "referencedTable" : null,
-      "referencedColumn" : null
-    },
-    "isFkChange" : false,
-    "impactPath" : [ {
-      "id" : "col:users.nickname",
-      "type" : "COLUMN",
-      "name" : "users.nickname",
-      "filePath" : null,
-      "line" : null
-    }, {
-      "id" : "field:User.nickname",
-      "type" : "FIELD",
-      "name" : "User.nickname",
-      "filePath" : "com/example/user/User.java",
-      "line" : 7
-    }, {
-      "id" : "repo:UserRepository.findByEmail",
-      "type" : "REPOSITORY",
-      "name" : "UserRepository.findByEmail",
-      "filePath" : "com/example/user/UserRepository.java",
-      "line" : 3
-    }, {
-      "id" : "svc:UserService.getByEmail",
-      "type" : "SERVICE",
-      "name" : "UserService.getByEmail",
-      "filePath" : "com/example/user/UserService.java",
-      "line" : 6
-    }, {
-      "id" : "ctrl:UserController.me",
-      "type" : "CONTROLLER",
-      "name" : "UserController.me",
-      "filePath" : "com/example/user/UserController.java",
-      "line" : 5
-    }, {
-      "id" : "api:GET /me",
-      "type" : "API",
-      "name" : "GET /me",
-      "filePath" : null,
-      "line" : null
-    } ]
-  }, {
-    "apiId" : "GET /users/by-nickname",
-    "riskLevel" : "MEDIUM",
-    "cause" : {
-      "type" : "ADD_NOT_NULL",
-      "table" : "users",
-      "column" : "nickname",
-      "fkName" : null,
-      "referencedTable" : null,
-      "referencedColumn" : null
-    },
-    "isFkChange" : false,
-    "impactPath" : [ {
-      "id" : "col:users.nickname",
-      "type" : "COLUMN",
-      "name" : "users.nickname",
-      "filePath" : null,
-      "line" : null
-    }, {
-      "id" : "field:User.nickname",
-      "type" : "FIELD",
-      "name" : "User.nickname",
-      "filePath" : "com/example/user/User.java",
-      "line" : 7
     }, {
       "id" : "repo:UserRepository.findByNickname",
       "type" : "REPOSITORY",

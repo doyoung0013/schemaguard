@@ -15,6 +15,118 @@
 
 ---
 
+## 12. 위험도 판정 개선: 변경을 코드(엔티티 매핑)와 비교해 재분류
+
+11번까지의 남은 오탐 53건 중 50건은 그래프 탐색이 아니라 **변경 종류를 판정하는 방식**에서 나왔습니다(9번 분석). SQL만 보고 `MODIFY`는 모두 HIGH, FK 제약 변경도 HIGH로 판정했기 때문입니다. 이번에는 두 가지를 바꿨습니다.
+1. 변경을 엔티티 매핑(코드가 기대하는 스키마)과 비교해 다시 분류합니다.
+2. 변경마다 "어떤 API가 실패할 수 있는가"의 범위를 나눕니다.
+
+### 1. 영향 범위를 세 가지로 나눔 (`ImpactAnalyzer`)
+
+| 범위 | 변경 | 시작점 | 이유 |
+|---|---|---|---|
+| **읽기 실패** | `DROP_COLUMN`, `RENAME_COLUMN`, `DROP_FK_COLUMN`, 비호환 `MODIFY_TYPE`, `DROP/RENAME_TABLE` | 컬럼을 읽는 모든 경로 + 연관 로딩(11번) | 엔티티를 SELECT하는 순간 실패 |
+| **쓰기 실패** | `ADD_NOT_NULL`, `ADD_UNIQUE`, `NARROW_COLUMN`, `ADD_FOREIGN_KEY`, `MODIFY_FK_REFERENCE` | 그 테이블의 엔티티를 저장하는 `save*` 메서드 | 기존 값을 읽는 데는 영향이 없고, 조건에 맞지 않는 값을 저장할 때만 실패 |
+| **영향 없음** | `DROP_FOREIGN_KEY`, `MODIFY_COMPATIBLE`, `ADD_COLUMN` | 없음 | 쿼리가 깨질 수 없음 |
+
+- 쓰기 경로는 `DependencyGraphBuilder`가 만드는 `writeMethodsByTable`(테이블 → `repo:XRepository.save*` 노드) 색인으로 찾습니다. 선언 메서드, 기본 CRUD, 서비스가 호출하는 `saveAll` 등을 모두 포함하고, `nodeIndex`는 한 번만 훑습니다.
+- 쓰기 경로의 영향 경로는 맨 앞에 대상 컬럼을 붙여서 왜 그 저장 경로인지 보이게 했습니다. 예: `col:reports.reason → repo:ReportRepository.save → svc:ReportService.report → … → api:POST /api/reports`
+- 분석기는 이제 `ImpactAnalyzer.of(builder)`로 만듭니다. 그래프 빌더의 색인을 모두 사용합니다. 기존 생성자도 그대로 동작합니다.
+
+### 2. 엔티티 매핑과 비교해 재분류 (`ChangeClassifier`, 신규)
+
+**필요한 정보 수집**
+- `EntityParser`가 필드마다 다음을 추가로 읽습니다.
+  - **Java 타입**: `@Enumerated(STRING)`은 String, `ORDINAL`은 Integer로 봅니다.
+  - **`@Column(length)`**: 지정하지 않으면 JPA 기본값 255
+  - **NULL을 쓸 수 있는지**: `nullable = false`, 기본형, `@Id`이면 쓸 수 없음
+- `MigrationParser`는 `MODIFY`, `CHANGE`, `ALTER ... TYPE`에서 새 컬럼 정의를 함께 담습니다. 예: `VARCHAR(200) NOT NULL` → `SchemaChange.ColumnDef`
+
+**분류 규칙**
+
+| 상황 | 결과 | 위험도 |
+|---|---|---|
+| Java 타입과 맞지 않는 SQL 타입 (String 필드인데 `INT`) | `MODIFY_TYPE` | HIGH (읽기) |
+| 엔티티 길이·범위보다 작아짐 (`length 500` → `VARCHAR(200)`, `Long` → `INT`) | `NARROW_COLUMN` | MEDIUM (쓰기) |
+| `NOT NULL` 추가 + 엔티티는 NULL을 쓸 수 있음 | `ADD_NOT_NULL` | MEDIUM (쓰기) |
+| `NOT NULL` 추가 + 엔티티가 NULL을 쓰지 않음 | `MODIFY_COMPATIBLE` | LOW |
+| 같은 타입에 같거나 큰 길이 | `MODIFY_COMPATIBLE` | LOW |
+| 엔티티가 매핑하지 않은 컬럼에 FK 추가 | `MODIFY_COMPATIBLE` | LOW (앱은 항상 NULL이라 FK 위반 없음) |
+| 매핑을 모르는 컬럼이나 타입 (날짜, 불리언, 소수 등) | 그대로 유지 | 보수적으로 HIGH |
+
+- 축소와 `NOT NULL`이 함께 있으면 두 변경으로 나눕니다.
+- 재분류한 변경에는 근거(`note`)를 붙여 콘솔과 JSON(`cause.note`, `cause.newDefinition`)에 보여 줍니다. 예: `엔티티 길이 500 → VARCHAR(200): 201~500자 값은 저장 실패(strict 모드) 또는 잘림. 기존 데이터 길이 확인 필요`
+- 리포트의 `parse.detectedChanges`도 재분류된 결과를 보여 줍니다.
+
+**파서 기본 위험도도 바꿨습니다**
+- `DROP_FOREIGN_KEY`: HIGH → LOW
+- `MODIFY_FK_REFERENCE`: HIGH → MEDIUM
+- DEFAULT 없이 `NOT NULL` 컬럼을 추가하면 `ADD_NOT_NULL`(쓰기)입니다. 엔티티가 모르는 컬럼이라 INSERT에서 값이 빠지기 때문입니다. DEFAULT가 있으면 `ADD_COLUMN`입니다.
+- `ADD CONSTRAINT ... UNIQUE (a, b)`의 대상 컬럼을 인덱스 정의에서 읽습니다. 이전에는 `unknown`이었습니다.
+
+### 결과: 9번의 실제 MySQL 측정과 다시 비교
+
+측정 데이터(actual.json)는 9번과 같습니다.
+
+| 기준 | 9번 | 11번 | **12번** |
+|---|---:|---:|---:|
+| 재현율 | 89.5% | 100% | **100% (95/95)** |
+| 정밀도 (예측된 모든 위험도) | 62.5% | 64.2% | **95.0% (95/100)** |
+| 정밀도 (HIGH만, 즉 CI 차단 기준) | 62.5% | 64.2% | **96.9% (95/98)** |
+| 마이그레이션 단위 차단 | 10/10 차단, 불필요한 차단 4 | 같음 | **10/10 차단, 불필요한 차단 0** |
+
+이제 **실제로 API를 깨뜨린 마이그레이션 10개만 정확히 차단**합니다(종료 코드 1). 나머지 6개는 통과합니다(종료 코드 0).
+
+| 시나리오 | 9번 판정 | 12번 판정 | 실제 |
+|---|---|---|---|
+| V5 `MODIFY nickname VARCHAR(50) NOT NULL` | HIGH, API 15개 | **LOW `MODIFY_COMPATIBLE`** (엔티티가 이미 `nullable=false, length=50`) | 실패 없음 |
+| V7 `DROP FOREIGN KEY fk_posts_author` | HIGH, API 11개 | **LOW, API 없음** | 실패 없음 |
+| V9 posts.category_id FK가 users를 참조 | HIGH, API 18개 | **MEDIUM, `POST /posts` 1개** | 측정 시드에서는 실패 없음 (아래 검증) |
+| V10 새 컬럼 reviewer_id에 FK 추가 | (예측 없음) | **LOW** (엔티티가 쓰지 않는 컬럼) | 실패 없음 |
+| V14 FK 재정의(CASCADE) + use_count 삭제 | HIGH, API 5개 | HIGH 4개 + MEDIUM 1개 | HIGH 4개와 일치 |
+| V16 reason `VARCHAR(200)`, UNIQUE 추가 | HIGH, API 5개 | **MEDIUM, `POST /api/reports` 1개** | 측정 시드에서는 실패 없음 (아래 검증) |
+
+**남은 오탐 5건**
+- 3건(HIGH): 11번에서 설명한 분기 한계입니다. 승인과 거절이 같은 `ReportService.process`를 쓰는 `reject` 사례입니다.
+- 2건(MEDIUM): V9와 V16입니다. 실제 MySQL에서 직접 검증해 보니 **실제 위험**이었습니다. 9번 측정의 시드 데이터에 경계값이 없어서 드러나지 않았을 뿐입니다.
+
+**V9와 V16 검증** (`community-mysql` 컨테이너, MySQL 8.0.36, 기본 `sql_mode`에 `STRICT_TRANS_TABLES` 포함. 별도 DB `sg_verify`에 기본 스키마와 시드를 넣고 확인한 뒤 삭제)
+- **V16:** 적용 후 300자 신고 사유를 INSERT하면 `ERROR 1406 (22001): Data too long for column 'reason'`이 납니다. 앱의 `ReportCreateRequest`는 `@Size(max = 500)`이라 검증을 통과합니다. 즉 사용자가 201~500자 사유를 입력하면 `POST /api/reports`가 500으로 실패합니다.
+- **V9:** 적용 전에는 users에 없는 id(4)의 카테고리로 게시글을 저장해도 성공합니다. 적용 후에는 `ERROR 1452 (23000): ... FOREIGN KEY (category_id) REFERENCES users (id)`로 실패합니다. 즉 `POST /posts`는 카테고리 id가 사용자 id와 겹치지 않으면 실패합니다.
+
+이 두 건을 경계값 데이터에서 실제로 실패한 것으로 치면 정밀도는 97.0%(97/100)입니다. 측정 하네스에 경계값 데이터 시나리오를 추가하는 것이 다음 과제입니다(앞서 이야기한 "행 수는 같은데 값이 달라지는 문제").
+
+### 테스트
+
+- 신규 `ChangeClassifierTest` 12개
+  - 엔티티와 같은 정의, 넓히기, 길이 축소, JPA 기본 길이(255), 정수 범위 축소, 비호환 타입, enum STRING
+  - 축소 + NOT NULL 분리, NULL을 쓰지 않는 필드의 SET NOT NULL, 모르는 컬럼은 보수적으로 유지
+  - 매핑되지 않은 컬럼의 FK, FK 제약 변경의 위험도
+- `SchemaGuardCLITest`
+  - `SET NOT NULL` 테스트를 "쓰기 경로만"으로 바꿨습니다. 픽스처에 `POST /signup`(`save`)을 추가하고, 읽기 API `GET /me`는 영향이 없음을 확인합니다.
+  - 호환 MODIFY, 축소(MEDIUM, note 포함), 비호환(HIGH, 종료 코드 1), FK 제약 삭제(종료 코드 0) 테스트 4개를 추가했습니다.
+- 결정성 스냅샷: 바뀐 내용을 확인한 뒤 다시 만들었습니다.
+  - 읽기 API에 붙어 있던 `ADD_NOT_NULL users.nickname` 3건이 빠졌습니다(NOT NULL은 읽기를 깨지 않음). 픽스처에 저장 경로가 없어서 남는 항목은 없습니다.
+  - `cause`에 `newDefinition`, `note` 필드가 추가됐습니다.
+- 전체 57개 통과
+
+### 성능
+
+- community를 5,000개 규모로 키운 프로젝트(Java 파일 4,977개), V16 기준 `--timing`입니다.
+  - 그래프 생성: 221~241ms
+  - 분석: 21~26ms
+  - 파싱: 약 4.4초로, 여전히 전체 시간의 대부분입니다.
+- 재분류는 변경 수에 비례하는 작업이라 측정할 만큼의 비용이 없습니다.
+
+### 한계
+
+- **이전 스키마를 직접 보지 않습니다.** "코드가 기대하는 스키마"(엔티티)와만 비교합니다. 엔티티의 `@Column(length)`가 실제 DB와 이미 다르면 판단이 틀릴 수 있습니다. 이전 마이그레이션을 차례로 적용해 실제 이전 타입을 아는 방식으로 보완할 수 있습니다.
+- **날짜, 불리언, 소수 타입의 변경은 아직 판단하지 않습니다.** 이 경우는 보수적으로 HIGH를 유지합니다.
+- **dirty checking(엔티티를 수정만 하고 `save`는 호출하지 않는 업데이트)은 쓰기 경로로 보지 않습니다.** 예를 들어 게시글 수정 API가 `post.update(...)`만 호출하면 길이 축소의 영향 목록에서 빠집니다.
+- **UNIQUE 추가는 앱의 사전 중복 검사 여부를 보지 않습니다.** 예를 들어 `existsByReporterIdAndPostId`로 미리 검사하는 경우에도 쓰기 경로를 MEDIUM으로 표시합니다.
+
+---
+
 ## 11. 연관 엔티티 로딩 전파: 실제 MySQL 측정에서 놓친 10건 해결
 
 9번 측정에서 놓친 10건(FN)은 원인이 모두 같았습니다. JPA는 **연관 엔티티를 로딩할 때 그 엔티티에 매핑된 컬럼을 전부 SELECT**합니다. 그런데 SchemaGuard는 "컬럼 → 그 컬럼을 가진 엔티티의 Repository"로만 따라갔습니다. 그래서 `users.email`을 지우면 User를 직접 조회하지 않아도 `Post.author`를 함께 로딩하는 게시글 목록이 실패하는데, 이 경로를 몰랐습니다.

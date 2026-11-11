@@ -133,6 +133,8 @@ public class JsonReporter implements ReportGenerator {
         m.put("fkName",           c.getFkName());
         m.put("referencedTable",  c.getReferencedTable());
         m.put("referencedColumn", c.getReferencedColumn());
+        m.put("newDefinition",    c.getColumnDef() != null ? c.getColumnDef().toString() : null);
+        m.put("note",             c.getNote());
         return m;
     }
 }

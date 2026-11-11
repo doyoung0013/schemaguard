@@ -115,6 +115,11 @@ public class ConsoleReporter implements ReportGenerator {
                 guide("생성/수정 API의 중복 검증 로직 확인", "Check duplicate validation logic in create/update APIs");
                 guide("중복 예외 처리 확인", "Check duplicate exception handling");
             }
+            case NARROW_COLUMN -> {
+                guide("기존 데이터 중 새 길이/범위를 넘는 값 확인 (예: CHAR_LENGTH(col) > N)", "Check existing values exceeding the new length/range");
+                guide("엔티티 @Column(length)와 입력 검증(@Size 등)을 새 길이에 맞추기", "Align @Column(length) and input validation (@Size) with the new length");
+                guide("SQL 모드(strict 여부)에 따라 오류 또는 잘림 발생", "Depending on SQL mode, writes fail or values are truncated");
+            }
             case ADD_COLUMN -> {
                 guide("새 컬럼이 필수 필드인지 확인", "Check whether the new column is required");
                 guide("Entity/DTO 반영 여부 확인", "Check Entity/DTO updates");

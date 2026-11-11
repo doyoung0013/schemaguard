@@ -239,11 +239,14 @@ class DeterminismTest {
         builder.setSourceRoot(src.toString());
         builder.build(scan.entities(), scan.fkMappings(), scan.repositories(),
                 scan.services(), scan.controllers());
-        ImpactResult result = new ImpactAnalyzer(builder.getGraph(), builder.getNodeIndex(),
-                builder.getFkFieldsReferencingTable()).analyze(parsed.changes());
+        List<schemaguard.model.SchemaChange> classified =
+                new schemaguard.analyzer.ChangeClassifier().classify(parsed.changes(), scan.entities(), scan.fkMappings());
+        ImpactResult result = ImpactAnalyzer.of(builder).analyze(classified);
 
         Path out = tmp.resolve("order-" + name + ".json");
-        new JsonReporter(out.toString(), parsed, List.of()).generate(result);
+        MigrationParser.ParseResult reported =
+                new MigrationParser.ParseResult(classified, parsed.failures(), parsed.totalStatements());
+        new JsonReporter(out.toString(), reported, List.of()).generate(result);
         return Files.readString(out, StandardCharsets.UTF_8);
     }
 }
