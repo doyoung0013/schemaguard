@@ -351,6 +351,27 @@ class SchemaGuardCLITest {
         assertFalse(Files.exists(report));
     }
 
+    /** 예전에는 없는 --source 로도 Java 파일 0개로 분석해 종료 코드 0 으로 통과했다 (CHANGELOG 22) */
+    @Test
+    void missingSourceFolderExitsTwo() throws IOException {
+        String[] args = {"--source", tmp.resolve("nope/java").toString(),
+                "--migration", sql("ALTER TABLE users DROP COLUMN email;").toString()};
+        assertEquals(SchemaGuardCLI.EXIT_ERROR, new CommandLine(new SchemaGuardCLI()).execute(args));
+    }
+
+    @Test
+    void sourceFolderWithoutJavaFilesExitsTwoWhenThereIsSomethingToAnalyze() throws IOException {
+        Path empty = tmp.resolve("empty/java");
+        Files.createDirectories(empty);
+        Path migration = sql("ALTER TABLE users DROP COLUMN email;");
+        assertEquals(SchemaGuardCLI.EXIT_ERROR, new CommandLine(new SchemaGuardCLI()).execute(
+                "--source", empty.toString(), "--migration", migration.toString()));
+        // 분석할 변경이 없으면 Java 파일을 보지 않으므로 그대로 통과
+        Files.writeString(migration, "-- nothing\n");
+        assertEquals(SchemaGuardCLI.EXIT_OK, new CommandLine(new SchemaGuardCLI()).execute(
+                "--source", empty.toString(), "--migration", migration.toString()));
+    }
+
     @Test
     void consoleModeWithoutReportPathDoesNotWriteJson() throws IOException {
         Path cwdDefault = Path.of("schemaguard-report.json");

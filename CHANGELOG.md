@@ -15,6 +15,127 @@
 
 ---
 
+## 22. 재사용 가능한 GitHub Action (`uses: doyoung0013/schemaguard@v1`)
+
+### 문제
+
+지금까지는 검사 대상 프로젝트가 SchemaGuard의 실행 절차를 직접 관리했습니다. README의 예시 workflow(약 230줄)를 복사해서 SchemaGuard clone, 빌드, 변경 파일 찾기, 실행, 판정, Step Summary 작성을 모두 그 프로젝트에 두었습니다. 이 방식에는 두 가지 문제가 있었습니다.
+- 사용자가 SchemaGuard 내부(바이너리 경로, 종료 코드, `results.tsv` 형식)를 알아야 합니다.
+- SchemaGuard가 바뀌면(16번 다중 분석, 17번 `--history` 등) 각 프로젝트가 YAML을 다시 고쳐야 합니다.
+
+### 변경: composite action
+
+이제 SchemaGuard 저장소 루트의 `action.yml`이 실행 절차를 관리합니다. 사용자는 소스와 마이그레이션 경로만 지정합니다.
+
+```yaml
+- uses: actions/checkout@v4
+- uses: doyoung0013/schemaguard@v1
+  with:
+    source: src/main/java
+    migration-dir: src/main/resources/db/migration
+```
+
+**단계** (`action.yml`)
+
+| 단계 | 내용 |
+|---|---|
+| Find SQL migrations to check (`action/find-migrations.sh`) | `files` 입력이 있으면 그 목록을 씁니다. 없으면 PR의 base 커밋과 HEAD 사이에 추가·수정된 `migration-dir`의 `.sql`을 찾습니다(삭제 제외). |
+| Check for JDK 17 / Set up JDK 17 | 러너에 JDK 17(`JAVA_HOME_17_X64`)이 있으면 그것을 씁니다. 없을 때만 `actions/setup-java`로 설치합니다. |
+| Cache / Build SchemaGuard | Gradle 캐시(키: Action 버전) + `installDist` |
+| Run SchemaGuard (`action/run-schemaguard.sh`) | 바뀐 SQL 전체를 CLI 한 번으로 분석합니다(16번). `--history`, `--no-lock-scope`를 입력에 따라 붙입니다. 판정은 하지 않습니다. |
+| Write summary (`action/summary.py`) | `results.tsv`와 파일별 JSON으로 판정하고 Step Summary를 쓰고 출력값을 정합니다. |
+| Upload SchemaGuard reports | `actions/upload-artifact`로 리포트 폴더를 올립니다. 실패해도 올립니다. |
+| Check result | `fail-on` 조건에 해당하면 `::error`와 함께 실패합니다. |
+
+**입력값:** `source`, `migration-dir`, `files`, `base`, `history`(기본 true), `lock-scope`(기본 true), `fail-on`(`high` / `parse-failure` / `none`), `language`, `upload-artifact`, `artifact-name`
+
+**출력값:** `blocked`, `high-count`, `medium-count`, `analyzed`, `report-dir`
+
+자세한 설명은 README "GitHub Actions 연동 방법"에 있습니다.
+
+### 설계에서 신경 쓴 점
+
+1. **사용자가 `fetch-depth`를 몰라도 됩니다.**
+   - 예전 예시는 `fetch-depth: 0`(전체 이력)을 요구했습니다. 이번 사용 예시에는 그 설정이 없습니다.
+   - 그래서 Action이 비교 기준 커밋(`github.event.pull_request.base.sha`)만 `git fetch --depth=1`로 가져옵니다.
+   - `pull_request`의 checkout은 base와 PR의 병합 커밋이라 `base..HEAD`가 곧 PR의 변경입니다. 두 커밋의 트리만 비교하므로 이력이 없어도 됩니다.
+2. **사용자 job의 Java 설정을 바꾸지 않습니다.** `setup-java`는 이후 단계의 `JAVA_HOME`을 바꿉니다. GitHub 호스팅 러너에 이미 있는 JDK 17을 쓰고, 없을 때만 설치합니다.
+3. **셸 주입 방지(5번)를 유지합니다.** 입력값과 파일명은 `${{ }}`로 스크립트에 끼워 넣지 않고 환경변수로만 넘깁니다. 파일 목록은 배열로 CLI에 전달합니다. composite action에서 특히 놓치기 쉬운 부분입니다.
+4. **판정과 실패를 나눴습니다.** 판정(`summary.py`)은 실패하지 않고 출력값만 정합니다. 리포트 업로드 뒤에 마지막 단계에서 실패합니다. 그래서 차단된 PR에서도 Step Summary와 Artifact가 남습니다.
+5. **MEDIUM은 차단하지 않습니다.** 21번까지의 정책 그대로입니다. Step Summary 마지막에 "병합 가능 (경고 있음)"으로 표시하고, 잠금 범위 경고는 표에 잠금 메서드와 모드, 근거(`note`)를 보입니다.
+6. **`gradlew`에 실행 권한이 없습니다**(저장소에 `100644`). 그래서 `bash gradlew`로 실행합니다.
+
+### 함께 고친 버그: 잘못된 `--source`로 검사 없이 통과
+
+- **증상:** Action 시뮬레이션에서 `source`를 없는 경로로 주자 "병합 가능"으로 통과했습니다.
+- **원인:** CLI가 없는 폴더를 Java 파일 0개로 분석했고, 영향 API가 없으니 종료 코드 0을 냈습니다. CI에서 경로를 잘못 설정하면 **모든 PR이 검사 없이 통과**하는 구멍이었습니다. 1번 항목의 원칙("읽지 못한 것은 '변경 없음'이 아니라 '알 수 없음'")과도 어긋납니다.
+- **수정:**
+  - `--source`가 폴더가 아니면 종료 코드 2입니다.
+  - 분석할 변경이 있는데 그 아래에 `.java` 파일이 하나도 없어도 종료 코드 2입니다.
+  - 변경이 없으면 Java 소스를 보지 않으므로 지금처럼 통과합니다.
+- **테스트:** `SchemaGuardCLITest.missingSourceFolderExitsTwo`, `sourceFolderWithoutJavaFilesExitsTwoWhenThereIsSomethingToAnalyze`
+
+### 검증
+
+**로컬 시뮬레이션**
+- GitHub Actions를 이 환경에서 실제로 돌릴 수는 없습니다. 그래서 `action.yml`을 읽어 단계 순서대로 실행하는 시뮬레이터를 만들었습니다.
+  - 각 단계의 `if:` 조건과 `${{ inputs.* }}`, `${{ steps.*.outputs.* }}`를 계산합니다.
+  - `run:` 단계는 같은 환경변수로 실행합니다(`GITHUB_OUTPUT`, `GITHUB_STEP_SUMMARY`, `RUNNER_TEMP`, `GITHUB_ACTION_PATH`).
+  - `uses:` 단계(setup-java, cache, upload-artifact)는 건너뜁니다.
+- 실제 Gradle 빌드와 SchemaGuard 실행을 포함합니다.
+
+| 시나리오 | 결과 |
+|---|---|
+| `files`: 컬럼 삭제(HIGH), `fail-on: none` | 성공, `blocked=true`, `high-count=4`, Summary "❌ 병합 차단" + "fail-on: none 이라 실패로 끝내지 않았습니다" |
+| `files`: 비관적 락 조회가 쓰던 인덱스 삭제 | 성공, `blocked=false`, `medium-count=2`, 표에 잠금 메서드 2개와 근거 |
+| `files`: 컬럼 추가 | 성공, `blocked=false` |
+| `files`: 컬럼 삭제, 기본 `fail-on` | **실패**(`::error title=SchemaGuard::병합 차단: HIGH 4건`) |
+| **PR 모드**: `--depth 1`로 복제한 저장소(base 커밋 없음). PR에 HIGH SQL, `` V3__$(touch PWNED).sql ``, `V4__safe file.sql`(공백), 파싱 실패 SQL, SQL 삭제, `.md` 추가 | base 커밋을 가져와 SQL 4개만 검사(삭제·`.md` 제외), 실패(HIGH 4건, 읽지 못한 SQL), **`PWNED` 파일 생성 안 됨** |
+| PR이 아닌 이벤트, `files` 없음 | notice "비교 기준이 없습니다" 후 건너뜀, 성공 |
+| SQL 변경이 없는 PR | 빌드 없이 건너뜀, 성공 |
+| `source` 경로 오류 | 수정 전 "병합 가능"으로 통과 → 수정 후 **실패**("SchemaGuard 실행 오류") |
+| 파일 2개 지정, `language: en`, `lock-scope: false`, `history: false` | 입력이 CLI 인자로 전달됨, 실패(HIGH) |
+
+**자체 테스트 workflow** (`.github/workflows/action-test.yml`)
+- 이 저장소에서 `uses: ./`로 Action을 실행합니다.
+- 테스트 프로젝트는 20번의 `scripts/lock-experiment/project`이고, 테스트 마이그레이션은 `action/test/V2~V4`입니다.
+- 위 HIGH, MEDIUM, 안전, 실패 시나리오를 출력값으로 확인합니다. PR에서는 변경 파일 찾기도 실행합니다.
+- **아직 GitHub에서 돌려 보지는 않았습니다.** 브랜치를 푸시하면 `action.yml`, `action/**`, `lib/**` 변경에 반응해 실행됩니다. 결과를 확인한 뒤 `v1` 태그를 다는 것을 권합니다.
+
+**단위 테스트:** 전체 166개 통과(새로 2개, 위 `--source` 버그)
+
+### `v1` 태그 (게시 전 할 일)
+
+1. GitHub에서 `SchemaGuard Action test` workflow가 통과하는지 확인합니다.
+2. 기본 브랜치에 병합합니다.
+3. `v1.0.0` 태그를 달고, `v1`이 최신 1.x를 가리키도록 태그를 하나 더 답니다(관례).
+4. (선택) GitHub Marketplace에 게시합니다. `action.yml`에 `name`, `description`, `branding`이 들어 있습니다.
+
+태그를 달기 전에는 `doyoung0013/schemaguard@<브랜치 또는 커밋 SHA>`로 쓸 수 있습니다.
+
+### 한계
+
+- **매 PR마다 SchemaGuard를 빌드합니다**(Gradle 캐시 사용). 더 빠르게 하려면 릴리스에 빌드된 jar를 올리고 Action이 내려받게 바꿀 수 있습니다.
+- **Step Summary는 한국어만 지원합니다.** `language: en`은 SchemaGuard 콘솔 출력에만 적용됩니다.
+- **`pull_request_target`이나 fork PR의 권한 문제는 따로 다루지 않았습니다.** Action은 `contents: read`만 필요합니다.
+- **checkout을 병합 커밋이 아니라 PR head로 바꾼 경우**(`ref: ${{ github.head_ref }}`), base가 앞서 나갔다면 base 쪽 변경도 비교에 섞일 수 있습니다. 기본 checkout을 권장합니다.
+
+### README
+
+이번에는 `readme.md`도 고쳤습니다.
+- "GitHub Actions 연동 방법"을 Action 사용법으로 바꿨습니다. 설정, 입력·출력값, 동작, 판정 기준, 리포트, Action 없이 직접 실행하는 방법을 담았습니다. 약 230줄짜리 YAML 복사본은 지웠고, 직접 실행용은 `examples/github-actions/schemaguard.yml`에 그대로 있습니다.
+- "주요 옵션" 표를 추가했습니다. 16~21번 옵션(여러 마이그레이션, `--report-dir`, `--history`, `--[no-]lock-scope`, `--threads`)과 종료 코드를 담았습니다.
+- 위험도 표에 "비관적 락 조회가 쓰던 인덱스 삭제 — MEDIUM"을 추가했습니다(20번 실측 수치 포함).
+- 분석 대상에 `@Lock`과 네이티브 `FOR UPDATE`를 추가했습니다.
+- 폴더 구조를 현재 파일에 맞췄습니다.
+- 향후 확장에서 끝난 "CI/CD 연동"을 빼고 "릴리스 jar 게시"를 넣었습니다.
+
+**관련 파일**
+- 신규: `action.yml`, `action/find-migrations.sh`, `action/run-schemaguard.sh`, `action/summary.py`, `action/test/V2~V4`, `.github/workflows/action-test.yml`, `examples/github-actions/schemaguard-action.yml`
+- 수정: `cli/SchemaGuardCLI.java`(`--source` 검사), 테스트 `cli/SchemaGuardCLITest.java`, `examples/github-actions/schemaguard.yml`(머리말), `readme.md`
+
+---
+
 ## 21. 비관적 락 분석 끄기 옵션(`--no-lock-scope`)과 SchemaGuard 자체 부담 측정
 
 ### 헷갈리기 쉬운 점: 두 가지 "성능"

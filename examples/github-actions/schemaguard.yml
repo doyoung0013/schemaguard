@@ -1,4 +1,7 @@
-# SchemaGuard GitHub Actions workflow (검사 대상 Spring Boot 프로젝트의 .github/workflows/에 복사)
+# SchemaGuard GitHub Actions workflow — Action 없이 직접 실행하는 방식
+#   보통은 Action(examples/github-actions/schemaguard-action.yml)을 쓰면 된다. 이 파일은 실행 절차를
+#   직접 고치거나, SchemaGuard 저장소를 Action 으로 쓸 수 없는 환경을 위한 것이다.
+#   (검사 대상 Spring Boot 프로젝트의 .github/workflows/에 복사)
 #
 # 동작
 #   1. PR에서 추가/수정된 마이그레이션 SQL만 고른다 (삭제된 파일 제외)

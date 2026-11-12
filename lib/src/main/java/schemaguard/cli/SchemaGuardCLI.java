@@ -115,7 +115,7 @@ public class SchemaGuardCLI implements Callable<Integer> {
             System.out.println("  Source    : " + sourcePath);
             System.out.println("  Migration : " + migrationPath);
             System.out.println();
-            if (!historyDirIsValid()) return EXIT_ERROR;
+            if (!historyDirIsValid() || !sourceDirIsValid()) return EXIT_ERROR;
 
             String json = reportPath;
             if (json == null && jsonOnly()) json = DEFAULT_REPORT_PATH;
@@ -150,7 +150,7 @@ public class SchemaGuardCLI implements Callable<Integer> {
         System.out.println("  Migrations: " + migrations.size() + " file(s)");
         migrations.forEach(m -> System.out.println("    " + m.getPath()));
         System.out.println();
-        if (!historyDirIsValid()) return EXIT_ERROR;
+        if (!historyDirIsValid() || !sourceDirIsValid()) return EXIT_ERROR;
 
         if (reportPath != null) {
             System.err.println(reportDir != null
@@ -219,6 +219,16 @@ public class SchemaGuardCLI implements Callable<Integer> {
             }
         }
         return overall;
+    }
+
+    /**
+     * --source 가 폴더가 아니면 실행 오류다. 예전에는 Java 파일 0개로 분석해 영향 API 없음(종료 코드 0)으로 통과했다.
+     * CI 에서 경로를 잘못 주면 모든 PR 이 검사 없이 통과하게 된다 (CHANGELOG 22).
+     */
+    private boolean sourceDirIsValid() {
+        if (new File(sourcePath).isDirectory()) return true;
+        System.err.println("SchemaGuard error: --source folder not found: " + sourcePath);
+        return false;
     }
 
     private boolean historyDirIsValid() {
@@ -381,6 +391,9 @@ public class SchemaGuardCLI implements Callable<Integer> {
         }
         long t0 = System.nanoTime();
         List<File> javaFiles = JavaSourceScanner.collectJavaFiles(new File(sourcePath));
+        // 분석할 변경이 있는데 Java 파일이 하나도 없으면 "영향 없음"이 아니라 "알 수 없음"이다 (경로 오류일 가능성이 크다).
+        if (javaFiles.isEmpty())
+            throw new IllegalStateException("no .java files under --source " + sourcePath + "; the impact cannot be analyzed");
         long t1 = System.nanoTime();
         int n = threads > 0 ? threads : JavaSourceScanner.defaultThreads();
         System.out.println("Scanning " + javaFiles.size() + " Java source files...");

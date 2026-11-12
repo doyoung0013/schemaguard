@@ -1,0 +1,30 @@
+# SchemaGuard Action 사용 예 (검사 대상 Spring Boot 프로젝트의 .github/workflows/ 에 복사)
+#
+# PR 에서 추가·수정된 마이그레이션 SQL 을 검사하고, HIGH 위험이나 읽지 못한 SQL 이 있으면 실패한다.
+# 결과는 Step Summary 와 Artifact(schemaguard-reports)에 남는다. 입력값은 action.yml 참고.
+# @v1 은 v1 태그를 게시한 뒤 쓸 수 있다. 그 전에는 브랜치 이름이나 커밋 SHA 로 고정한다.
+
+name: SchemaGuard
+
+on:
+  pull_request:
+    paths:
+      - 'src/main/resources/db/migration/**'
+
+permissions:
+  contents: read
+
+jobs:
+  schema-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: doyoung0013/schemaguard@v1
+        with:
+          source: src/main/java
+          migration-dir: src/main/resources/db/migration
+          # history: 'true'        # 파일 이름이 V<번호>__<설명>.sql 이 아니면 'false'
+          # lock-scope: 'true'     # 비관적 락 잠금 범위 경고 (MEDIUM, 차단 안 함)
+          # fail-on: high          # high | parse-failure | none
+          # language: ko           # ko | en (SchemaGuard 콘솔 출력)
