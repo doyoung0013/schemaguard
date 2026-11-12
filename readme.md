@@ -13,6 +13,8 @@ SchemaGuard는 SQL 마이그레이션 파일과 Java 소스 코드를 함께 분
 예를 들어 `users.email` 컬럼을 삭제했을 때,  
 해당 컬럼과 연결된 Entity, Repository, Service, Controller, API까지 추적하여 어떤 API가 런타임 오류를 일으킬 수 있는지 리포트로 출력합니다.
 
+변경 이력과 측정 방법·결과의 자세한 내용은 [`CHANGELOG.md`](CHANGELOG.md)에 있습니다.
+
 ---
 
 ## 🎯 프로젝트 목표
@@ -23,6 +25,16 @@ SchemaGuard는 SQL 마이그레이션 파일과 Java 소스 코드를 함께 분
 - 위험도(HIGH / MEDIUM / LOW) 기반 **경고 리포트** 생성
 - **GitHub Actions CI/CD** 파이프라인 연동을 통한 PR 단계 자동 차단
 
+
+---
+
+## ✨ 주요 기능
+
+- **API까지 영향 추적:** Entity → Repository → Service → Controller → API 경로를 따라갑니다. 다른 엔티티를 함께 로딩하는 경로(`@EntityGraph`, `join fetch`, 지연 로딩 초기화, DTO·매퍼의 static 메서드)도 추적합니다.
+- **코드 기준 위험도 판정:** SQL만 보지 않고 엔티티 매핑과 비교합니다. 엔티티와 호환되는 타입 변경은 LOW로 보고, 길이 축소나 `NOT NULL` 추가는 값을 저장하는 API만 영향으로 봅니다.
+- **오류 없이 생기는 장애 탐지:** UNIQUE 삭제(중복 데이터가 조용히 저장됨)와, 비관적 락 조회가 쓰던 인덱스 삭제(잠금 범위 확대)를 찾습니다.
+- **모르면 통과시키지 않음:** 읽지 못한 SQL 구문이 있거나(종료 코드 3) 소스 경로가 잘못되면(종료 코드 2) "변경 없음"으로 통과시키지 않고 차단합니다.
+- **CI용 설계:** GitHub Action 제공, 여러 마이그레이션을 한 번에 분석(Java 소스는 한 번만 파싱), 병렬 파싱, OS·파일 순서와 무관하게 같은 리포트
 
 ---
 
@@ -421,7 +433,8 @@ schemaguard/
 **Java 소스 코드**
 - Entity 클래스 (`@Entity`, `@Table`, `@Column`)
 - Repository 계층 (`JpaRepository` 상속, 쿼리 메서드, `@Query`, `@Lock` 비관적 락, 네이티브 `FOR UPDATE`)
-- Service 계층 (메서드 호출 관계)
+- Service 계층 (메서드 호출 관계, 연관 엔티티 getter 호출로 생기는 지연 로딩)
+- DTO·매퍼 클래스의 static 메서드 (`UserResponse.from(user)` 안의 연관 로딩)
 - Controller 계층 (`@GetMapping`, `@PostMapping` 등 엔드포인트 매핑)
 
 **확장 예정**
@@ -433,47 +446,65 @@ schemaguard/
 
 ## 🚨 DB 스키마 변경 유형 및 위험도
 
-| 변경 유형 | 위험도 | 설명 |
+위험도는 SQL만이 아니라 **엔티티 매핑(코드가 기대하는 스키마)과 비교해** 정합니다. 매핑을 모르거나 정의를 찾지 못하면 보수적으로 높게 봅니다. **HIGH**는 병합을 막고, **MEDIUM**은 경고만 합니다.
+
+| 변경 유형 | 위험도 | 영향 범위 |
 |---|---|---|
-| 컬럼 삭제 | 🔴 HIGH | `@Column`, JPQL, Native Query, DTO 매핑 불일치로 런타임 오류 |
-| 컬럼명 변경 | 🔴 HIGH | Entity, Query, Projection 불일치 |
-| 타입 변경 | 🔴 HIGH | Java ↔ DB 타입 불일치로 변환/캐스팅 오류 |
-| 테이블 삭제 | 🔴 HIGH | Repository 및 Query 실행 실패 |
-| 테이블명 변경 | 🔴 HIGH | `@Table` 불일치 및 Query 오류 |
-| FK 컬럼 삭제/변경 | 🔴 HIGH | `@JoinColumn`, `@ManyToOne` 등 연관관계 매핑 깨짐 |
-| nullable → not null | 🟡 MEDIUM | INSERT/UPDATE 시 null 값 오류 |
-| unique 제약 추가 | 🟡 MEDIUM | 중복 데이터 INSERT/UPDATE 시 제약 위반 |
-| UNIQUE 제약·인덱스 삭제 | 🔴 HIGH | 오류 없이 중복 데이터가 저장됨 (중복 가입·중복 지급 등) |
-| 일반 인덱스 삭제 | 🟢 LOW | 쿼리는 깨지지 않음 (조회 성능만 영향) |
-| 비관적 락 조회가 쓰던 인덱스 삭제 | 🟡 MEDIUM | 대체 인덱스가 없으면 MySQL InnoDB가 훑은 행을 모두 잠가 동시 요청이 줄을 섬 (실측: 재고 차감 TPS 675 → 6.3). 차단하지 않고 경고 |
-| 컬럼 추가 | 🟢 LOW | 기존 코드에 영향 없음 |
+| 컬럼 삭제 / 컬럼명 변경 | 🔴 HIGH | 그 컬럼을 읽는 모든 API (연관 로딩 포함) |
+| 테이블 삭제 / 테이블명 변경 | 🔴 HIGH | 그 테이블을 읽는 모든 API, 이 테이블을 FK로 참조하는 쪽 포함 |
+| FK 컬럼 삭제 | 🔴 HIGH | `@JoinColumn` 연관관계를 쓰는 API |
+| 엔티티와 맞지 않는 타입 변경 (String 필드인데 `INT`) | 🔴 HIGH | 그 컬럼을 읽는 API |
+| UNIQUE 제약·인덱스 삭제 | 🔴 HIGH | 그 테이블에 저장하는 API (오류 없이 중복이 저장됨) |
+| 엔티티보다 길이·범위가 줄어드는 타입 변경 | 🟡 MEDIUM | 그 테이블에 저장하는 API (긴 값 저장 실패 또는 잘림) |
+| `NOT NULL` 추가 (엔티티가 NULL을 쓸 수 있을 때) | 🟡 MEDIUM | 그 테이블에 저장하는 API |
+| UNIQUE 추가, FK 제약 추가·참조 변경 | 🟡 MEDIUM | 그 테이블에 저장하는 API |
+| 비관적 락 조회가 쓰던 인덱스 삭제 (대체 인덱스 없음) | 🟡 MEDIUM | 그 잠금 조회를 거치는 API (잠금 범위 확대, MySQL InnoDB) |
+| 엔티티와 호환되는 타입 변경, 엔티티가 이미 NULL을 쓰지 않는 `NOT NULL` | 🟢 LOW | 없음 |
+| FK 제약 삭제, 일반 인덱스 삭제, 컬럼 추가 | 🟢 LOW | 없음 (쿼리가 깨지지 않음) |
+| 읽지 못한 SQL 구문 | ⚠️ 차단 | 분석 불완전 (종료 코드 3) |
+
+---
+
+## 📈 검증 결과
+
+| 항목 | 결과 |
+|---|---|
+| 탐지 정확도 — 실제 MySQL에 마이그레이션을 적용하고 API를 호출해 실패한 경우와 비교 (실제 프로젝트 `community`, 엔드포인트 30개) | 재현율 **100%** (99/99), HIGH 정밀도 **97.1%** |
+| 비관적 락 잠금 범위 — MySQL 8.0에서 잠긴 레코드 수 측정 (시나리오 28쌍) | 정밀도·재현율 **1.0**. 경고한 인덱스 삭제에서 재고 차감 처리량 TPS **675 → 6.3** |
+| CI 실행 시간 — 마이그레이션 18개 검사 (파일마다 따로 실행 → 한 번 실행) | Java 파일 100개 **18.8초 → 1.6초**, 5,000개 **137.6초 → 6.2초** |
+
+측정 조건과 한계(시나리오 구성, 합성 데이터, 단일 머신)는 CHANGELOG 9·13·16·20번에 있습니다.
 
 ---
 
 ## 🔄 처리 흐름
 
 ```
-SQL 마이그레이션 파일                Java 소스 코드
-       │                                  │
-       ▼                                  ▼
- SqlMigrationParser                   EntityParser
- (JSQLParser)                      RepositoryParser     ← JavaParser (AST)
-       │                           ServiceParser
-       │                           ControllerParser
-       │                                  │
-       └──────────────┬───────────────────┘
-                      ▼
-           DependencyGraphBuilder
-           (방향성 그래프 구성, JGraphT)
-                      │
-                      ▼
-              ImpactAnalyzer
-          (BFS 역방향 탐색으로
-           영향받는 API 식별)
-                      │
-                      ▼
-             ReportGenerator
-          (콘솔 출력 / JSON 출력)
+SQL 마이그레이션 파일 (+ --history 이전 마이그레이션)        Java 소스 코드
+       │                                                      │
+       ▼                                                      ▼
+ SqlMigrationParser (JSQLParser)                  JavaSourceScanner (JavaParser AST, 병렬)
+ IndexCatalog (인덱스 삭제 전후)                  Entity / Repository / Service / Controller Parser
+       │                                                      │
+       │                                                      ▼
+       │                                           DependencyGraphBuilder
+       │                                           (방향성 그래프, JGraphT)
+       └──────────────────────┬───────────────────────────────┘
+                              ▼
+                      ChangeClassifier
+              (엔티티 매핑과 비교해 위험도 재분류)
+                              │
+                              ▼
+                      LockScopeAnalyzer
+              (인덱스 삭제의 비관적 락 잠금 범위)
+                              │
+                              ▼
+                       ImpactAnalyzer
+              (역방향 탐색으로 영향받는 API 식별)
+                              │
+                              ▼
+                       ReportGenerator
+                    (콘솔 출력 / JSON 출력)
 ```
 
 ---
