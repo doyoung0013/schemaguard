@@ -115,6 +115,8 @@
 
   같은 job에서 Action을 여러 번 쓰면 두 번째부터 "another job may be creating this cache" 경고가 나지만, 저장만 건너뛸 뿐 동작에는 영향이 없습니다.
 
+  **수정 후 2회차 실행(커밋 `e59c006`)도 성공했습니다.** 캐시는 새 키 `schemaguard-gradle-Linux-3634d014a8720eec`로 저장됐고, 출력값 검사 결과는 1회차와 같습니다(`HIGH_COUNT=4`, `LOCK_MEDIUM=2`, 기본 `fail-on` 실행은 `failure`).
+
 **단위 테스트:** 전체 166개 통과(새로 2개, 위 `--source` 버그)
 
 ### `v1` 태그 (게시 전 할 일)
