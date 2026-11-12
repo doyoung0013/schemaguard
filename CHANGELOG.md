@@ -41,7 +41,7 @@
 |---|---|
 | Find SQL migrations to check (`action/find-migrations.sh`) | `files` 입력이 있으면 그 목록을 씁니다. 없으면 PR의 base 커밋과 HEAD 사이에 추가·수정된 `migration-dir`의 `.sql`을 찾습니다(삭제 제외). |
 | Check for JDK 17 / Set up JDK 17 | 러너에 JDK 17(`JAVA_HOME_17_X64`)이 있으면 그것을 씁니다. 없을 때만 `actions/setup-java`로 설치합니다. |
-| Cache / Build SchemaGuard | Gradle 캐시(키: Action 버전) + `installDist` |
+| Compute Gradle cache key / Cache / Build SchemaGuard | Gradle 캐시(키: SchemaGuard 빌드 파일 해시) + `installDist` |
 | Run SchemaGuard (`action/run-schemaguard.sh`) | 바뀐 SQL 전체를 CLI 한 번으로 분석합니다(16번). `--history`, `--no-lock-scope`를 입력에 따라 붙입니다. 판정은 하지 않습니다. |
 | Write summary (`action/summary.py`) | `results.tsv`와 파일별 JSON으로 판정하고 Step Summary를 쓰고 출력값을 정합니다. |
 | Upload SchemaGuard reports | `actions/upload-artifact`로 리포트 폴더를 올립니다. 실패해도 올립니다. |
@@ -100,13 +100,26 @@
 - 이 저장소에서 `uses: ./`로 Action을 실행합니다.
 - 테스트 프로젝트는 20번의 `scripts/lock-experiment/project`이고, 테스트 마이그레이션은 `action/test/V2~V4`입니다.
 - 위 HIGH, MEDIUM, 안전, 실패 시나리오를 출력값으로 확인합니다. PR에서는 변경 파일 찾기도 실행합니다.
-- **아직 GitHub에서 돌려 보지는 않았습니다.** 브랜치를 푸시하면 `action.yml`, `action/**`, `lib/**` 변경에 반응해 실행됩니다. 결과를 확인한 뒤 `v1` 태그를 다는 것을 권합니다.
+- **GitHub에서 실제로 실행했습니다** (브랜치 푸시로 실행된 `SchemaGuard Action test` 1회차).
+
+| 확인한 것 | 결과 |
+|---|---|
+| `scenarios` job | **성공** (약 1분) |
+| 출력값 검사 | `HIGH_BLOCKED=true`, `HIGH_COUNT=4`, `LOCK_BLOCKED=false`, `LOCK_MEDIUM=2`, `SAFE_BLOCKED=false`, `SAFE_ANALYZED=1`, 기본 `fail-on`의 실행은 `failure` |
+| JDK | 러너의 JDK 17을 찾아 `setup-java` 단계는 건너뜀 |
+| 빌드 시간 | 첫 빌드 약 29초, 같은 job의 다음 실행은 약 5.5초 |
+| Artifact | 파일별 JSON과 `results.tsv` 업로드됨 |
+| `pr-detect` job | push 이벤트라 설계대로 건너뜀. PR을 열면 실행 |
+
+  실행 로그에서 버그를 하나 찾아 고쳤습니다. **Gradle 캐시 키가 `schemaguard-gradle-Linux-v4`로 만들어졌습니다.** composite action 안에서 `github.action_ref`는 SchemaGuard가 아니라 그 순간 실행 중인 `actions/cache@v4`의 버전을 가리키기 때문입니다. 이대로면 SchemaGuard의 의존성이 바뀌어도 캐시가 갱신되지 않습니다. `hashFiles()`는 작업 폴더 밖(Action 폴더)을 읽지 못하므로, 셸 단계에서 `lib/build.gradle`, `settings.gradle`, `gradle-wrapper.properties`의 해시로 키를 만들도록 바꿨습니다.
+
+  같은 job에서 Action을 여러 번 쓰면 두 번째부터 "another job may be creating this cache" 경고가 나지만, 저장만 건너뛸 뿐 동작에는 영향이 없습니다.
 
 **단위 테스트:** 전체 166개 통과(새로 2개, 위 `--source` 버그)
 
 ### `v1` 태그 (게시 전 할 일)
 
-1. GitHub에서 `SchemaGuard Action test` workflow가 통과하는지 확인합니다.
+1. GitHub에서 `SchemaGuard Action test` workflow가 통과하는지 확인합니다(push 실행은 통과. PR을 열어 `pr-detect`까지 확인 권장).
 2. 기본 브랜치에 병합합니다.
 3. `v1.0.0` 태그를 달고, `v1`이 최신 1.x를 가리키도록 태그를 하나 더 답니다(관례).
 4. (선택) GitHub Marketplace에 게시합니다. `action.yml`에 `name`, `description`, `branding`이 들어 있습니다.
@@ -118,6 +131,7 @@
 - **매 PR마다 SchemaGuard를 빌드합니다**(Gradle 캐시 사용). 더 빠르게 하려면 릴리스에 빌드된 jar를 올리고 Action이 내려받게 바꿀 수 있습니다.
 - **Step Summary는 한국어만 지원합니다.** `language: en`은 SchemaGuard 콘솔 출력에만 적용됩니다.
 - **`pull_request_target`이나 fork PR의 권한 문제는 따로 다루지 않았습니다.** Action은 `contents: read`만 필요합니다.
+- **실행 로그에 Node.js 20 지원 종료 경고가 나옵니다.** `actions/checkout@v4`, `actions/cache@v4`, `actions/upload-artifact@v4`가 대상이고, 지금은 Node.js 24로 실행되어 동작합니다. 이 액션들의 새 주 버전으로 올리는 것은 따로 확인이 필요합니다.
 - **checkout을 병합 커밋이 아니라 PR head로 바꾼 경우**(`ref: ${{ github.head_ref }}`), base가 앞서 나갔다면 base 쪽 변경도 비교에 섞일 수 있습니다. 기본 checkout을 권장합니다.
 
 ### README
