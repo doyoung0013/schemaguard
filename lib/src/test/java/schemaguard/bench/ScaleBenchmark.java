@@ -101,11 +101,11 @@ public final class ScaleBenchmark {
 
     private static void worker(Path project, String changeArg) throws Exception {
         Path src = project.resolve("src/main/java");
-        List<File> files = SourceScanner.collectJavaFiles(src.toFile());
+        List<File> files = JavaSourceScanner.collectJavaFiles(src.toFile());
         int groups = Math.max(1, files.size() / 4);
 
         long t0 = System.nanoTime();
-        SourceScanner.Result scan = new SourceScanner().scan(files);
+        JavaSourceScanner.Result scan = new JavaSourceScanner().scan(files);
         double parseMs = (System.nanoTime() - t0) / 1e6;
 
         // 그래프 생성
@@ -142,7 +142,7 @@ public final class ScaleBenchmark {
 
         for (String c : changeArg.split(",")) {
             int count = Integer.parseInt(c);
-            List<SchemaChange> changes = new MigrationParser().parseSQL(migration(count, groups)).changes();
+            List<SchemaChange> changes = new SqlMigrationParser().parseSQL(migration(count, groups)).changes();
             ImpactAnalyzer analyzer = new ImpactAnalyzer(builder.getGraph(), builder.getNodeIndex(),
                     builder.getFkFieldsReferencingTable());
             List<Double> times = new ArrayList<>();

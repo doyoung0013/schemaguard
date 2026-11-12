@@ -2,7 +2,7 @@ package schemaguard.model;
 
 /**
  * SQL 마이그레이션 파일에서 추출한 단일 스키마 변경 정보.
- * MigrationParser가 생성하고, ImpactAnalyzer가 소비한다.
+ * SqlMigrationParser가 생성하고, ImpactAnalyzer가 소비한다.
  */
 public class SchemaChange {
 

@@ -11,7 +11,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-class SourceScannerTest {
+class JavaSourceScannerTest {
 
     @TempDir
     Path tmp;
@@ -19,10 +19,10 @@ class SourceScannerTest {
     @Test
     void parsesEachFileOnceAndMatchesPerParserResults() throws Exception {
         SampleProjectGenerator.generate(tmp, 40);
-        List<File> files = SourceScanner.collectJavaFiles(tmp.resolve("src/main/java").toFile());
+        List<File> files = JavaSourceScanner.collectJavaFiles(tmp.resolve("src/main/java").toFile());
         assertEquals(40, files.size());
 
-        SourceScanner.Result shared = new SourceScanner().scan(files);
+        JavaSourceScanner.Result shared = new JavaSourceScanner().scan(files);
         assertEquals(40, shared.parseCalls());
         assertTrue(shared.failedFiles().isEmpty());
 
@@ -51,8 +51,8 @@ class SourceScannerTest {
         Path broken = tmp.resolve("src/main/java/com/example/Broken.java");
         Files.writeString(broken, "public class Broken { void x( { }");
 
-        List<File> files = SourceScanner.collectJavaFiles(tmp.resolve("src/main/java").toFile());
-        SourceScanner.Result r = new SourceScanner().scan(files);
+        List<File> files = JavaSourceScanner.collectJavaFiles(tmp.resolve("src/main/java").toFile());
+        JavaSourceScanner.Result r = new JavaSourceScanner().scan(files);
 
         assertEquals(9, r.parseCalls());
         assertEquals(1, r.failedFiles().size());
@@ -62,6 +62,6 @@ class SourceScannerTest {
 
     @Test
     void missingDirectoryYieldsNoFiles() {
-        assertTrue(SourceScanner.collectJavaFiles(tmp.resolve("nope").toFile()).isEmpty());
+        assertTrue(JavaSourceScanner.collectJavaFiles(tmp.resolve("nope").toFile()).isEmpty());
     }
 }

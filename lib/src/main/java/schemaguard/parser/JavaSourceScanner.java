@@ -27,7 +27,7 @@ import java.util.List;
  * 이전에는 네 파서가 각자 StaticJavaParser.parse()를 호출해 파일 하나를 네 번 파싱했다.
  * AST는 파일 하나를 처리한 뒤 바로 참조를 놓으므로, 한 번에 메모리에 남는 AST는 최대 한 개다.
  */
-public class SourceScanner {
+public class JavaSourceScanner {
 
     public record Result(List<EntityMapping> entities,
                          List<FkMapping> fkMappings,

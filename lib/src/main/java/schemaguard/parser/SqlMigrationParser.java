@@ -34,7 +34,7 @@ import java.util.regex.Pattern;
  * 인덱스·제약 삭제(DROP INDEX, DROP CONSTRAINT)는 이름만 있어서 IndexCatalog(이전 마이그레이션)로 정의를 찾는다.
  * 파일 안의 구문도 순서대로 카탈로그에 반영하므로, 같은 파일에서 만들고 지운 인덱스도 찾는다.
  */
-public class MigrationParser {
+public class SqlMigrationParser {
 
     /** 식별자: users, `users`, "users", db.users, `db`.`users` */
     private static final String IDENT = "([`\"\\w.]+)";
@@ -88,11 +88,11 @@ public class MigrationParser {
     private IndexCatalog catalog;
 
     /** 이전 마이그레이션을 모를 때. 인덱스 삭제는 엔티티 선언으로 분류하거나, 그래도 모르면 보수적으로 본다. */
-    public MigrationParser() {
+    public SqlMigrationParser() {
         this(new IndexCatalog());
     }
 
-    public MigrationParser(IndexCatalog history) {
+    public SqlMigrationParser(IndexCatalog history) {
         this.history = history;
     }
 
@@ -343,7 +343,7 @@ public class MigrationParser {
                 case "DROP_UNIQUE" -> {
                     // ALTER TABLE t DROP UNIQUE (a, b): JSQLParser 는 컬럼을 pkColumns 에 담는다
                     List<String> cols = expr.getPkColumns() == null ? List.of()
-                            : expr.getPkColumns().stream().map(MigrationParser::ident).toList();
+                            : expr.getPkColumns().stream().map(SqlMigrationParser::ident).toList();
                     result.add(dropUnique(table, null, cols, "UNIQUE (" + String.join(", ", cols) + ") 삭제"));
                 }
 
@@ -566,7 +566,7 @@ public class MigrationParser {
 
     /** ADD UNIQUE 의 대상 컬럼. ADD UNIQUE [INDEX name] (a), ADD CONSTRAINT name UNIQUE (a, b), ADD COLUMN x ... UNIQUE */
     private static List<String> uniqueColumns(AlterExpression expr) {
-        if (expr.getUkColumns() != null) return expr.getUkColumns().stream().map(MigrationParser::ident).toList();
+        if (expr.getUkColumns() != null) return expr.getUkColumns().stream().map(SqlMigrationParser::ident).toList();
         List<String> fromIndex = IndexCatalog.columns(expr.getIndex());
         if (!fromIndex.isEmpty()) return fromIndex;
         if (expr.getColDataTypeList() != null && !expr.getColDataTypeList().isEmpty())

@@ -559,7 +559,7 @@ schemaguard/
 │                   │   └── ImpactResult.java
 │                   │
 │                   ├── parser/
-│                   │   ├── MigrationParser.java
+│                   │   ├── SqlMigrationParser.java
 │                   │   ├── EntityParser.java
 │                   │   ├── RepositoryParser.java
 │                   │   ├── ServiceParser.java
@@ -639,7 +639,7 @@ schemaguard/
 SQL 마이그레이션 파일                Java 소스 코드
        │                                  │
        ▼                                  ▼
- MigrationParser                   EntityParser
+ SqlMigrationParser                   EntityParser
  (JSQLParser)                      RepositoryParser     ← JavaParser (AST)
        │                           ServiceParser
        │                           ControllerParser

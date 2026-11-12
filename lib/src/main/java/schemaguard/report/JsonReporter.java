@@ -5,7 +5,7 @@ import com.fasterxml.jackson.core.util.DefaultPrettyPrinter;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectWriter;
 import schemaguard.model.*;
-import schemaguard.parser.MigrationParser;
+import schemaguard.parser.SqlMigrationParser;
 
 import java.io.File;
 import java.io.IOException;
@@ -16,7 +16,7 @@ public class JsonReporter implements ReportGenerator {
 
     private final String outputPath;
     private final ObjectWriter writer;
-    private final MigrationParser.ParseResult parse;      // null이면 parse 섹션 생략
+    private final SqlMigrationParser.ParseResult parse;      // null이면 parse 섹션 생략
     private final List<String> sourceParseFailures;
 
     public JsonReporter(String outputPath) {
@@ -24,7 +24,7 @@ public class JsonReporter implements ReportGenerator {
     }
 
     public JsonReporter(String outputPath,
-                        MigrationParser.ParseResult parse,
+                        SqlMigrationParser.ParseResult parse,
                         List<String> sourceParseFailures) {
         this.outputPath          = outputPath;
         // 기본 pretty printer는 OS 줄바꿈(Windows CRLF, Linux LF)을 쓴다.
@@ -105,7 +105,7 @@ public class JsonReporter implements ReportGenerator {
         m.put("failedStatements", parse.failures().size());
 
         List<Map<String, Object>> failures = new ArrayList<>();
-        for (MigrationParser.ParseFailure f : parse.failures()) {
+        for (SqlMigrationParser.ParseFailure f : parse.failures()) {
             Map<String, Object> fm = new LinkedHashMap<>();
             fm.put("line",      f.line());
             fm.put("statement", f.statement());

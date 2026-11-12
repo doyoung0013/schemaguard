@@ -117,7 +117,7 @@ class TypedAssociationTest {
 
     private static Set<String> apis(DependencyGraphBuilder b, String sql) {
         Set<String> ids = new TreeSet<>();
-        ImpactAnalyzer.of(b).analyze(new MigrationParser().parseSQL(sql).changes())
+        ImpactAnalyzer.of(b).analyze(new SqlMigrationParser().parseSQL(sql).changes())
                 .getAffectedApis().forEach(a -> ids.add(a.getApiId()));
         return ids;
     }
@@ -203,18 +203,18 @@ class TypedAssociationTest {
                     @GetMapping("/names") public Object names() { return helperService.names(); }
                 }
                 """);
-        List<File> files = SourceScanner.collectJavaFiles(src.toFile());
+        List<File> files = JavaSourceScanner.collectJavaFiles(src.toFile());
 
-        SourceScanner.Result withoutSolver = new SourceScanner().scan(files, null);
-        SourceScanner withScanner = new SourceScanner();
-        SourceScanner.Result withSolver = withScanner.scan(files, src.toFile());
+        JavaSourceScanner.Result withoutSolver = new JavaSourceScanner().scan(files, null);
+        JavaSourceScanner withScanner = new JavaSourceScanner();
+        JavaSourceScanner.Result withSolver = withScanner.scan(files, src.toFile());
 
         assertEquals(Set.of(), apis(graph(withoutSolver), "ALTER TABLE users DROP COLUMN name;"));
         assertEquals(Set.of("GET /names"), apis(graph(withSolver), "ALTER TABLE users DROP COLUMN name;"));
         assertTrue(withScanner.typeResolutionCounts()[2] >= 1, Arrays.toString(withScanner.typeResolutionCounts()));
     }
 
-    private static DependencyGraphBuilder graph(SourceScanner.Result r) {
+    private static DependencyGraphBuilder graph(JavaSourceScanner.Result r) {
         DependencyGraphBuilder b = new DependencyGraphBuilder();
         b.build(r.entities(), r.fkMappings(), r.repositories(), r.services(), r.controllers());
         return b;

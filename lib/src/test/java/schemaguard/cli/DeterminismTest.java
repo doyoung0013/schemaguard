@@ -7,8 +7,8 @@ import picocli.CommandLine;
 import schemaguard.analyzer.ImpactAnalyzer;
 import schemaguard.graph.DependencyGraphBuilder;
 import schemaguard.model.ImpactResult;
-import schemaguard.parser.MigrationParser;
-import schemaguard.parser.SourceScanner;
+import schemaguard.parser.SqlMigrationParser;
+import schemaguard.parser.JavaSourceScanner;
 import schemaguard.report.JsonReporter;
 
 import java.io.File;
@@ -207,7 +207,7 @@ class DeterminismTest {
 
     @Test
     void javaFileOrderDoesNotChangeReport() throws Exception {
-        List<File> files = SourceScanner.collectJavaFiles(src.toFile());
+        List<File> files = JavaSourceScanner.collectJavaFiles(src.toFile());
         String sorted = analyzeToJson(files, "sorted");
 
         for (long seed = 1; seed <= 20; seed++) {
@@ -223,7 +223,7 @@ class DeterminismTest {
 
     @Test
     void collectJavaFilesReturnsPathSortedList() {
-        List<File> files = SourceScanner.collectJavaFiles(src.toFile());
+        List<File> files = JavaSourceScanner.collectJavaFiles(src.toFile());
         List<String> paths = files.stream().map(f -> f.getPath().replace('\\', '/')).toList();
         List<String> expected = new ArrayList<>(paths);
         Collections.sort(expected);
@@ -232,8 +232,8 @@ class DeterminismTest {
 
     /** CLI 와 같은 파이프라인을 주어진 파일 순서로 돌려 JSON 리포트 문자열을 얻는다. */
     private String analyzeToJson(List<File> javaFiles, String name) throws Exception {
-        MigrationParser.ParseResult parsed = new MigrationParser().parse(migration.toFile());
-        SourceScanner.Result scan = new SourceScanner().scan(javaFiles);
+        SqlMigrationParser.ParseResult parsed = new SqlMigrationParser().parse(migration.toFile());
+        JavaSourceScanner.Result scan = new JavaSourceScanner().scan(javaFiles);
 
         DependencyGraphBuilder builder = new DependencyGraphBuilder();
         builder.setSourceRoot(src.toString());
@@ -244,8 +244,8 @@ class DeterminismTest {
         ImpactResult result = ImpactAnalyzer.of(builder).analyze(classified);
 
         Path out = tmp.resolve("order-" + name + ".json");
-        MigrationParser.ParseResult reported =
-                new MigrationParser.ParseResult(classified, parsed.failures(), parsed.totalStatements());
+        SqlMigrationParser.ParseResult reported =
+                new SqlMigrationParser.ParseResult(classified, parsed.failures(), parsed.totalStatements());
         new JsonReporter(out.toString(), reported, List.of()).generate(result);
         return Files.readString(out, StandardCharsets.UTF_8);
     }

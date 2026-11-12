@@ -3,7 +3,7 @@ package schemaguard.analyzer;
 import org.junit.jupiter.api.Test;
 import schemaguard.model.*;
 import schemaguard.parser.EntityParser;
-import schemaguard.parser.MigrationParser;
+import schemaguard.parser.SqlMigrationParser;
 
 import java.util.List;
 
@@ -42,7 +42,7 @@ class IndexChangeClassifierTest {
 
     private static SchemaChange classifyOne(String sql) throws Exception {
         EntityParser.ParseResult pr = new EntityParser().parseSource(ENTITIES);
-        MigrationParser.ParseResult parsed = new MigrationParser().parseSQL(sql);
+        SqlMigrationParser.ParseResult parsed = new SqlMigrationParser().parseSQL(sql);
         assertFalse(parsed.hasFailures(), () -> parsed.failures().toString());
         List<SchemaChange> out = new ChangeClassifier()
                 .classify(parsed.changes(), pr.entityMappings(), pr.fkMappings(), pr.indexes());
@@ -114,7 +114,7 @@ class IndexChangeClassifierTest {
         EntityParser.ParseResult pr = new EntityParser().parseSource(ENTITIES);
         schemaguard.parser.IndexCatalog catalog = new schemaguard.parser.IndexCatalog();
         catalog.applyAll("CREATE TABLE users (id BIGINT PRIMARY KEY, email VARCHAR(100) UNIQUE);");
-        List<SchemaChange> parsed = new MigrationParser(catalog).parseSQL("DROP INDEX email ON users;").changes();
+        List<SchemaChange> parsed = new SqlMigrationParser(catalog).parseSQL("DROP INDEX email ON users;").changes();
         SchemaChange c = new ChangeClassifier()
                 .classify(parsed, pr.entityMappings(), pr.fkMappings(), pr.indexes()).get(0);
         assertEquals(ChangeType.DROP_UNIQUE, c.getChangeType());

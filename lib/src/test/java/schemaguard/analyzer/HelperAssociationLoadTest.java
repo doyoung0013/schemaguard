@@ -119,7 +119,7 @@ class HelperAssociationLoadTest {
     }
 
     private static List<AffectedApi> analyze(DependencyGraphBuilder b, String sql) {
-        return ImpactAnalyzer.of(b).analyze(new MigrationParser().parseSQL(sql).changes()).getAffectedApis();
+        return ImpactAnalyzer.of(b).analyze(new SqlMigrationParser().parseSQL(sql).changes()).getAffectedApis();
     }
 
     private static Set<String> apis(DependencyGraphBuilder b, String sql) {

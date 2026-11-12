@@ -160,16 +160,16 @@ public final class ParseBenchmark {
         sampler.start();
 
         long t0 = System.nanoTime();
-        List<SchemaChange> changes = new MigrationParser().parse(migration.toFile()).changes();
-        List<File> files = SourceScanner.collectJavaFiles(src.toFile());
+        List<SchemaChange> changes = new SqlMigrationParser().parse(migration.toFile()).changes();
+        List<File> files = JavaSourceScanner.collectJavaFiles(src.toFile());
         long t1 = System.nanoTime();
 
         com.sun.management.ThreadMXBean threads =
                 (com.sun.management.ThreadMXBean) java.lang.management.ManagementFactory.getThreadMXBean();
         long allocBefore = threads.getCurrentThreadAllocatedBytes();
-        SourceScanner.Result scan = switch (mode) {
+        JavaSourceScanner.Result scan = switch (mode) {
             case "legacy" -> legacyScan(files);
-            case "shared" -> new SourceScanner().scan(files);
+            case "shared" -> new JavaSourceScanner().scan(files);
             default -> throw new IllegalArgumentException(mode);
         };
         long t2 = System.nanoTime();
@@ -201,7 +201,7 @@ public final class ParseBenchmark {
     }
 
     /** 개선 전 SchemaGuardCLI의 스캔 루프를 그대로 옮긴 것. 파일마다 파서 4개가 각자 파싱한다. */
-    private static SourceScanner.Result legacyScan(List<File> javaFiles) {
+    private static JavaSourceScanner.Result legacyScan(List<File> javaFiles) {
         EntityParser entityParser = new EntityParser();
         RepositoryParser repositoryParser = new RepositoryParser();
         ServiceParser serviceParser = new ServiceParser();
@@ -232,12 +232,12 @@ public final class ParseBenchmark {
                 failed.add(javaFile.getPath());
             }
         }
-        return new SourceScanner.Result(entities, fkMappings, repos, services, controllers, failed, calls);
+        return new JavaSourceScanner.Result(entities, fkMappings, repos, services, controllers, failed, calls);
     }
 
     // ── 결과 지문 ────────────────────────────────────────────────────────────
 
-    private static String fingerprint(SourceScanner.Result scan, DependencyGraphBuilder builder,
+    private static String fingerprint(JavaSourceScanner.Result scan, DependencyGraphBuilder builder,
                                       ImpactResult result) throws Exception {
         List<String> lines = new ArrayList<>();
         for (AffectedApi a : result.getAffectedApis()) {

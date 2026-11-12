@@ -3,7 +3,7 @@ package schemaguard.analyzer;
 import org.junit.jupiter.api.Test;
 import schemaguard.model.*;
 import schemaguard.parser.EntityParser;
-import schemaguard.parser.MigrationParser;
+import schemaguard.parser.SqlMigrationParser;
 
 import java.util.List;
 
@@ -31,7 +31,7 @@ class ChangeClassifierTest {
 
     private static List<SchemaChange> classify(String sql) throws Exception {
         EntityParser.ParseResult pr = new EntityParser().parseSource(USER);
-        List<SchemaChange> changes = new MigrationParser().parseSQL(sql).changes();
+        List<SchemaChange> changes = new SqlMigrationParser().parseSQL(sql).changes();
         return new ChangeClassifier().classify(changes, pr.entityMappings(), pr.fkMappings());
     }
 

@@ -8,9 +8,9 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-class MigrationParserTest {
+class SqlMigrationParserTest {
 
-    private final MigrationParser parser = new MigrationParser();
+    private final SqlMigrationParser parser = new SqlMigrationParser();
 
     private static long count(List<SchemaChange> changes, ChangeType type) {
         return changes.stream().filter(c -> c.getChangeType() == type).count();
@@ -24,7 +24,7 @@ class MigrationParserTest {
         }
         sql.append("THIS IS NOT VALID SQL;\n");   // 10번째 줄
 
-        MigrationParser.ParseResult r = parser.parseSQL(sql.toString());
+        SqlMigrationParser.ParseResult r = parser.parseSQL(sql.toString());
 
         assertEquals(10, r.totalStatements());
         assertEquals(9, count(r.changes(), ChangeType.DROP_COLUMN));
@@ -41,7 +41,7 @@ class MigrationParserTest {
                 ALTER TABLE users DROP COLUMN nickname;
                 """;
 
-        MigrationParser.ParseResult r = parser.parseSQL(sql);
+        SqlMigrationParser.ParseResult r = parser.parseSQL(sql);
 
         assertFalse(r.hasFailures(), () -> "unexpected failures: " + r.failures());
         assertEquals(2, count(r.changes(), ChangeType.DROP_COLUMN));
@@ -54,7 +54,7 @@ class MigrationParserTest {
 
     @Test
     void quotedIdentifiersAreNormalizedForGraphMatching() {
-        MigrationParser.ParseResult r =
+        SqlMigrationParser.ParseResult r =
                 parser.parseSQL("ALTER TABLE `mydb`.`users` DROP COLUMN `email`;");
 
         assertFalse(r.hasFailures());
@@ -65,7 +65,7 @@ class MigrationParserTest {
 
     @Test
     void addForeignKeyWithOnDeleteClauseParses() {
-        MigrationParser.ParseResult r = parser.parseSQL(
+        SqlMigrationParser.ParseResult r = parser.parseSQL(
                 "ALTER TABLE posts ADD CONSTRAINT fk_author FOREIGN KEY (author_id) "
                         + "REFERENCES users(id) ON DELETE CASCADE ON UPDATE NO ACTION;");
 
@@ -78,7 +78,7 @@ class MigrationParserTest {
 
     @Test
     void dropAndAddForeignKeyOnSameTableBecomesModify() {
-        MigrationParser.ParseResult r = parser.parseSQL("""
+        SqlMigrationParser.ParseResult r = parser.parseSQL("""
                 ALTER TABLE posts DROP FOREIGN KEY fk_author;
                 ALTER TABLE posts ADD CONSTRAINT fk_author FOREIGN KEY (author_id) REFERENCES members(id);
                 """);
@@ -98,7 +98,7 @@ class MigrationParserTest {
                 ALTER TABLE users DROP COLUMN email;
                 """;
 
-        MigrationParser.ParseResult r = parser.parseSQL(sql);
+        SqlMigrationParser.ParseResult r = parser.parseSQL(sql);
 
         assertFalse(r.hasFailures(), () -> "unexpected failures: " + r.failures());
         assertEquals(2, r.totalStatements());
@@ -108,7 +108,7 @@ class MigrationParserTest {
     @Test
     void alterClauseUnknownToJsqlParserIsReportedAsFailure() {
         // JSQLParser는 이 구문을 예외 없이 Alter(UNSPECIFIC)로 돌려준다.
-        MigrationParser.ParseResult r = parser.parseSQL("""
+        SqlMigrationParser.ParseResult r = parser.parseSQL("""
                 ALTER TABLE users DROP COLUMN email;
                 ALTER TABLE users FROBNICATE email;
                 """);
@@ -120,7 +120,7 @@ class MigrationParserTest {
 
     @Test
     void renameTableIsDetectedInBothSyntaxes() {
-        MigrationParser.ParseResult r = parser.parseSQL("""
+        SqlMigrationParser.ParseResult r = parser.parseSQL("""
                 ALTER TABLE `users` RENAME TO `members`;
                 RENAME TABLE posts TO articles, comments TO replies;
                 """);
@@ -136,7 +136,7 @@ class MigrationParserTest {
 
     @Test
     void alterColumnSetNotNullAndTypeChangeAreDetected() {
-        MigrationParser.ParseResult r = parser.parseSQL("""
+        SqlMigrationParser.ParseResult r = parser.parseSQL("""
                 ALTER TABLE users ALTER COLUMN email SET NOT NULL;
                 ALTER TABLE users ALTER COLUMN age TYPE BIGINT;
                 ALTER TABLE users ALTER COLUMN bio DROP NOT NULL;
@@ -155,7 +155,7 @@ class MigrationParserTest {
 
     @Test
     void emptyOrCommentOnlyFileHasNoStatementsAndNoFailures() {
-        MigrationParser.ParseResult r = parser.parseSQL("-- nothing here\n\n");
+        SqlMigrationParser.ParseResult r = parser.parseSQL("-- nothing here\n\n");
 
         assertEquals(0, r.totalStatements());
         assertTrue(r.changes().isEmpty());

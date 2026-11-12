@@ -38,7 +38,7 @@ class GraphPropagationTest {
     }
 
     private static Set<String> apis(DependencyGraphBuilder b, boolean propagateFk, String sql) {
-        List<SchemaChange> changes = new MigrationParser().parseSQL(sql).changes();
+        List<SchemaChange> changes = new SqlMigrationParser().parseSQL(sql).changes();
         ImpactAnalyzer analyzer = propagateFk
                 ? new ImpactAnalyzer(b.getGraph(), b.getNodeIndex(), b.getFkFieldsReferencingTable())
                 : new ImpactAnalyzer(b.getGraph(), b.getNodeIndex());

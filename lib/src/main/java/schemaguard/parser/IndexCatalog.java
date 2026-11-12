@@ -89,7 +89,7 @@ public class IndexCatalog {
     }
 
     private void applyAll(String sql, String origin) {
-        for (String stmt : MigrationParser.splitStatementTexts(sql)) {
+        for (String stmt : SqlMigrationParser.splitStatementTexts(sql)) {
             if (apply(stmt, origin)) appliedStatements++;
             else failedStatements++;
         }
@@ -98,21 +98,21 @@ public class IndexCatalog {
     /** 구문 하나를 적용한다. 읽지 못하면 false. 인덱스와 관계없는 구문(INSERT 등)은 아무것도 바꾸지 않고 true. */
     public boolean apply(String sql, String origin) {
         try {
-            Matcher dropFk = MigrationParser.DROP_FK_PATTERN.matcher(sql);
+            Matcher dropFk = SqlMigrationParser.DROP_FK_PATTERN.matcher(sql);
             if (dropFk.matches()) {
-                remove(MigrationParser.ident(dropFk.group(1)), dropFk.group(2));
+                remove(SqlMigrationParser.ident(dropFk.group(1)), dropFk.group(2));
                 return true;
             }
-            Matcher addFk = MigrationParser.ADD_FK_PATTERN.matcher(sql);
+            Matcher addFk = SqlMigrationParser.ADD_FK_PATTERN.matcher(sql);
             if (addFk.matches()) {
-                String table = MigrationParser.ident(addFk.group(1));
-                String name = addFk.group(2) != null ? MigrationParser.ident(addFk.group(2)) : null;
+                String table = SqlMigrationParser.ident(addFk.group(1));
+                String name = addFk.group(2) != null ? SqlMigrationParser.ident(addFk.group(2)) : null;
                 add(new IndexDef(table, name, List.of(), splitColumns(addFk.group(3)), Kind.FOREIGN_KEY, origin));
                 return true;
             }
-            Matcher dropKey = MigrationParser.DROP_INDEX_ALTER_PATTERN.matcher(sql);
+            Matcher dropKey = SqlMigrationParser.DROP_INDEX_ALTER_PATTERN.matcher(sql);
             if (dropKey.matches()) {
-                remove(MigrationParser.ident(dropKey.group(1)), dropKey.group(2));
+                remove(SqlMigrationParser.ident(dropKey.group(1)), dropKey.group(2));
                 return true;
             }
 
@@ -123,7 +123,7 @@ public class IndexCatalog {
             else if (stmt instanceof Drop drop)               applyDrop(drop);
             else if (stmt instanceof RenameTableStatement rn) {
                 for (Map.Entry<Table, Table> e : rn.getTableNames())
-                    renameTable(MigrationParser.ident(e.getKey().getName()), MigrationParser.ident(e.getValue().getName()));
+                    renameTable(SqlMigrationParser.ident(e.getKey().getName()), SqlMigrationParser.ident(e.getValue().getName()));
             }
             return true;
         } catch (Exception | Error e) {   // JSQLParser 는 일부 입력에 TokenMgrError 를 던진다
@@ -132,12 +132,12 @@ public class IndexCatalog {
     }
 
     private void applyCreateTable(CreateTable ct, String origin) {
-        String table = MigrationParser.ident(ct.getTable().getName());
+        String table = SqlMigrationParser.ident(ct.getTable().getName());
         byTable.remove(table);   // CREATE TABLE 은 새 테이블이다 (같은 이름을 지우고 다시 만든 경우)
         if (ct.getColumnDefinitions() != null) {
             for (ColumnDefinition cd : ct.getColumnDefinitions()) {
                 String spec = cd.getColumnSpecs() == null ? "" : " " + String.join(" ", cd.getColumnSpecs()).toUpperCase() + " ";
-                String col = MigrationParser.ident(cd.getColumnName());
+                String col = SqlMigrationParser.ident(cd.getColumnName());
                 if (spec.contains(" PRIMARY KEY ")) add(primaryKey(table, List.of(col), origin));
                 else if (spec.contains(" UNIQUE ")) add(implicitUnique(table, List.of(col), origin));
             }
@@ -148,51 +148,51 @@ public class IndexCatalog {
     }
 
     private void applyCreateIndex(CreateIndex ci, String origin) {
-        String table = MigrationParser.ident(ci.getTable().getName());
+        String table = SqlMigrationParser.ident(ci.getTable().getName());
         Index idx = ci.getIndex();
         boolean unique = idx.getType() != null && idx.getType().toUpperCase().contains("UNIQUE");
-        add(new IndexDef(table, MigrationParser.ident(idx.getName()), List.of(), columns(idx),
+        add(new IndexDef(table, SqlMigrationParser.ident(idx.getName()), List.of(), columns(idx),
                 unique ? Kind.UNIQUE : Kind.INDEX, origin));
     }
 
     private void applyAlter(Alter alter, String origin) {
-        String table = MigrationParser.ident(alter.getTable().getName());
+        String table = SqlMigrationParser.ident(alter.getTable().getName());
         for (AlterExpression e : alter.getAlterExpressions()) {
             switch (e.getOperation().name()) {
                 case "ADD" -> {
                     if (e.getUkColumns() != null) {
-                        List<String> cols = e.getUkColumns().stream().map(MigrationParser::ident).toList();
+                        List<String> cols = e.getUkColumns().stream().map(SqlMigrationParser::ident).toList();
                         add(e.getUkName() != null
-                                ? new IndexDef(table, MigrationParser.ident(e.getUkName()), List.of(), cols, Kind.UNIQUE, origin)
+                                ? new IndexDef(table, SqlMigrationParser.ident(e.getUkName()), List.of(), cols, Kind.UNIQUE, origin)
                                 : implicitUnique(table, cols, origin));
                     } else if (e.getIndex() != null) {
                         addIndex(table, e.getIndex().getType(), e.getIndex().getName(), columns(e.getIndex()), origin);
                     } else if (e.getColDataTypeList() != null) {
                         for (AlterExpression.ColumnDataType cdt : e.getColDataTypeList()) {
                             String spec = cdt.getColumnSpecs() == null ? "" : " " + String.join(" ", cdt.getColumnSpecs()).toUpperCase() + " ";
-                            String col = MigrationParser.ident(cdt.getColumnName());
+                            String col = SqlMigrationParser.ident(cdt.getColumnName());
                             if (spec.contains(" PRIMARY KEY ")) add(primaryKey(table, List.of(col), origin));
                             else if (spec.contains(" UNIQUE ")) add(implicitUnique(table, List.of(col), origin));
                         }
                     }
                 }
                 case "DROP" -> {
-                    if (e.getColumnName() != null) dropColumn(table, MigrationParser.ident(e.getColumnName()));
+                    if (e.getColumnName() != null) dropColumn(table, SqlMigrationParser.ident(e.getColumnName()));
                     else if (e.getIndex() != null && e.getIndex().getName() != null) remove(table, e.getIndex().getName());
                     else if (e.getConstraintName() != null) remove(table, e.getConstraintName());
                 }
                 case "DROP_PRIMARY_KEY" -> byTable.getOrDefault(table, new ArrayList<>()).removeIf(d -> d.kind() == Kind.PRIMARY_KEY);
                 case "DROP_UNIQUE" -> {
                     List<String> cols = e.getPkColumns() == null ? List.of()
-                            : e.getPkColumns().stream().map(MigrationParser::ident).toList();
+                            : e.getPkColumns().stream().map(SqlMigrationParser::ident).toList();
                     byTable.getOrDefault(table, new ArrayList<>()).removeIf(d -> d.kind() == Kind.UNIQUE && d.sameColumnsAs(cols));
                 }
                 case "RENAME_TABLE" -> {
-                    if (e.getNewTableName() != null) renameTable(table, MigrationParser.ident(e.getNewTableName()));
+                    if (e.getNewTableName() != null) renameTable(table, SqlMigrationParser.ident(e.getNewTableName()));
                 }
                 case "RENAME" -> {
                     if (e.getColumnOldName() != null && e.getColumnName() != null)
-                        renameColumn(table, MigrationParser.ident(e.getColumnOldName()), MigrationParser.ident(e.getColumnName()));
+                        renameColumn(table, SqlMigrationParser.ident(e.getColumnOldName()), SqlMigrationParser.ident(e.getColumnName()));
                 }
                 default -> { }
             }
@@ -201,11 +201,11 @@ public class IndexCatalog {
 
     private void applyDrop(Drop drop) {
         String type = drop.getType() == null ? "" : drop.getType().toUpperCase();
-        String name = MigrationParser.ident(drop.getName().getName());
+        String name = SqlMigrationParser.ident(drop.getName().getName());
         if (type.equals("TABLE") || type.equals("VIEW")) {
             byTable.remove(name);
         } else if (type.equals("INDEX")) {
-            String table = MigrationParser.dropIndexTable(drop);
+            String table = SqlMigrationParser.dropIndexTable(drop);
             if (table != null) remove(table, name);
             else byTable.values().forEach(defs -> defs.removeIf(d -> d.answersTo(name)));
         }
@@ -221,7 +221,7 @@ public class IndexCatalog {
 
     private void addIndex(String table, String rawType, String rawName, List<String> cols, String origin) {
         String type = rawType == null ? "" : rawType.toUpperCase();
-        String name = rawName == null ? null : MigrationParser.ident(rawName);
+        String name = rawName == null ? null : SqlMigrationParser.ident(rawName);
         if (type.contains("PRIMARY")) {
             add(primaryKey(table, cols, origin));
         } else if (type.contains("FOREIGN")) {
@@ -237,7 +237,7 @@ public class IndexCatalog {
     }
 
     private void remove(String table, String rawName) {
-        String name = MigrationParser.ident(rawName);
+        String name = SqlMigrationParser.ident(rawName);
         byTable.getOrDefault(lower(table), new ArrayList<>()).removeIf(d -> d.answersTo(name));
     }
 
@@ -285,11 +285,11 @@ public class IndexCatalog {
 
     static List<String> columns(Index idx) {
         if (idx == null || idx.getColumns() == null) return List.of();   // DROP INDEX 의 Index 는 컬럼이 없다
-        return idx.getColumnsNames().stream().map(MigrationParser::ident).toList();
+        return idx.getColumnsNames().stream().map(SqlMigrationParser::ident).toList();
     }
 
     private static List<String> splitColumns(String raw) {
-        return Arrays.stream(raw.split(",")).map(MigrationParser::ident).filter(s -> !s.isEmpty()).toList();
+        return Arrays.stream(raw.split(",")).map(SqlMigrationParser::ident).filter(s -> !s.isEmpty()).toList();
     }
 
     private static String lower(String s) {

@@ -29,7 +29,7 @@
 | `CREATE UNIQUE INDEX uq ON users (email)` | UNIQUE 추가 (MEDIUM) | 무시 |
 
 원인은 두 곳입니다.
-- `MigrationParser.handleAlter`의 `DROP` 분기가 컬럼 이름이 없으면 그냥 지나갔습니다. `DROP INDEX`, `DROP CONSTRAINT`는 컬럼 이름이 없습니다.
+- `SqlMigrationParser.handleAlter`의 `DROP` 분기가 컬럼 이름이 없으면 그냥 지나갔습니다. `DROP INDEX`, `DROP CONSTRAINT`는 컬럼 이름이 없습니다.
 - `handleDrop`이 `Drop` 구문의 대상 종류(TABLE, INDEX, SEQUENCE …)를 보지 않고 전부 테이블 삭제로 만들었습니다.
 
 1번 항목의 원칙("읽지 못한 변경은 '변경 없음'이 아니라 '알 수 없음'")과 어긋나는 구멍이었습니다.
@@ -180,7 +180,7 @@ getter 체인을 **루트(체인이 시작하는 변수나 식)부터** 해석�
 
 ### 함께 고친 버그
 
-- **문법 오류 파일이 실패로 보고되지 않던 문제:** `SourceScanner`가 `StaticJavaParser` 대신 스캔마다 `JavaParser` 인스턴스를 쓰도록 바꾸면서 생긴 문제입니다. 인스턴스는 문법 오류에도 예외 없이 부분 결과를 돌려줍니다. `isSuccessful()`을 확인해 실패로 보고하게 했습니다. 기존 `SourceScannerTest`와 결정성 스냅샷(파싱 실패 파일 포함)이 이 문제를 잡아 줬습니다.
+- **문법 오류 파일이 실패로 보고되지 않던 문제:** `JavaSourceScanner`가 `StaticJavaParser` 대신 스캔마다 `JavaParser` 인스턴스를 쓰도록 바꾸면서 생긴 문제입니다. 인스턴스는 문법 오류에도 예외 없이 부분 결과를 돌려줍니다. `isSuccessful()`을 확인해 실패로 보고하게 했습니다. 기존 `JavaSourceScannerTest`와 결정성 스냅샷(파싱 실패 파일 포함)이 이 문제를 잡아 줬습니다.
 - **symbol solver가 람다 파라미터를 `? super Pet` 같은 제약 타입으로 돌려줌:** 이 경우 경계 타입(`Pet`)으로 풀어서 씁니다.
 
 ### 테스트
@@ -337,7 +337,7 @@ V3 : col:posts.title → load:Post → helper:ReportSummaryResponse.from → svc
   - **Java 타입**: `@Enumerated(STRING)`은 String, `ORDINAL`은 Integer로 봅니다.
   - **`@Column(length)`**: 지정하지 않으면 JPA 기본값 255
   - **NULL을 쓸 수 있는지**: `nullable = false`, 기본형, `@Id`이면 쓸 수 없음
-- `MigrationParser`는 `MODIFY`, `CHANGE`, `ALTER ... TYPE`에서 새 컬럼 정의를 함께 담습니다. 예: `VARCHAR(200) NOT NULL` → `SchemaChange.ColumnDef`
+- `SqlMigrationParser`는 `MODIFY`, `CHANGE`, `ALTER ... TYPE`에서 새 컬럼 정의를 함께 담습니다. 예: `VARCHAR(200) NOT NULL` → `SchemaChange.ColumnDef`
 
 **분류 규칙**
 
@@ -789,7 +789,7 @@ FP 51건 중 50건은 그래프 탐색의 문제가 아닙니다. **변경 종�
 
 **변경**
 
-1. `SourceScanner.collectJavaFiles`가 경로(`/` 정규화) 기준으로 정렬된 목록을 돌려줍니다.
+1. `JavaSourceScanner.collectJavaFiles`가 경로(`/` 정규화) 기준으로 정렬된 목록을 돌려줍니다.
 2. `ImpactAnalyzer`
    - 시작 노드를 중복 제거한 뒤 노드 id 순으로 탐색합니다.
    - BFS가 이웃을 노드 id 순으로 방문합니다.
@@ -900,9 +900,9 @@ FP 51건 중 50건은 그래프 탐색의 문제가 아닙니다. **변경 종�
 
 **변경**
 
-- `SourceScanner`(신규): 파일당 `StaticJavaParser.parse()`를 **한 번만** 호출하고, 만든 AST(`CompilationUnit`)를 네 추출기가 공유합니다. AST는 파일 하나를 처리한 뒤 바로 참조를 놓으므로 메모리에 남는 AST는 최대 한 개입니다. 파싱 호출 수와 실패 파일 목록도 함께 돌려줍니다.
+- `JavaSourceScanner`(신규): 파일당 `StaticJavaParser.parse()`를 **한 번만** 호출하고, 만든 AST(`CompilationUnit`)를 네 추출기가 공유합니다. AST는 파일 하나를 처리한 뒤 바로 참조를 놓으므로 메모리에 남는 AST는 최대 한 개입니다. 파싱 호출 수와 실패 파일 목록도 함께 돌려줍니다.
 - 파서 4개에 `parse(CompilationUnit cu, String filePath)`를 추가했습니다. 기존 `parse(File)`, `parseSource(String)`는 그대로 남겨 호환성을 유지합니다.
-- `SchemaGuardCLI`가 `SourceScanner`를 사용합니다. Java 파일 수집 함수도 `SourceScanner.collectJavaFiles`로 옮겼습니다.
+- `SchemaGuardCLI`가 `JavaSourceScanner`를 사용합니다. Java 파일 수집 함수도 `JavaSourceScanner.collectJavaFiles`로 옮겼습니다.
 - `--timing` 옵션(신규)을 주면 구간별 소요 시간과 파싱 호출 수를 출력합니다.
 
   ```
@@ -937,7 +937,7 @@ FP 51건 중 50건은 그래프 탐색의 문제가 아닙니다. **변경 종�
 
 - 벤치마크: 세 규모 모두 legacy와 shared의 결과 지문(SHA-256)이 일치했습니다.
 - 실제 CLI: 이전 커밋으로 빌드한 CLI와 새 CLI를 1,000개, 5,000개 샘플에 실행했습니다. JSON 리포트가 **바이트 단위로 동일**했고(영향 API 36개), 종료 코드도 같았습니다(1).
-- `SourceScannerTest`(신규): 파싱 호출 수 = 파일 수, 파서별 개별 파싱 결과와 추출 개수 일치, 문법 오류 파일은 실패 목록에 들어가고 나머지는 정상 분석되는지 확인합니다.
+- `JavaSourceScannerTest`(신규): 파싱 호출 수 = 파일 수, 파서별 개별 파싱 결과와 추출 개수 일치, 문법 오류 파일은 실패 목록에 들어가고 나머지는 정상 분석되는지 확인합니다.
 
 **남은 병목 (후속 후보)**
 
@@ -965,7 +965,7 @@ FP 51건 중 50건은 그래프 탐색의 문제가 아닙니다. **변경 종�
 
 합성 샘플(4,977개 기준 3.1배)보다 개선 폭이 작습니다. 이 프로젝트는 파일이 작고 DTO처럼 추출할 게 적은 파일이 많아서 파일당 고정 비용(파일 수집 약 1초, JIT 워밍업)의 비중이 크기 때문으로 추정하지만, 원인을 따로 검증하지는 않았습니다. 파싱 호출이 4배 줄어드는 것은 구조상 항상 같고, 전체 시간 개선 폭은 코드 모양에 따라 1.5~3배 정도로 달라진다고 보는 게 안전합니다.
 
-**관련 파일**: `SourceScanner.java`(신규), `EntityParser.java`, `RepositoryParser.java`, `ServiceParser.java`, `ControllerParser.java`, `SchemaGuardCLI.java`, `lib/build.gradle`(`benchmark` 태스크), `bench/SampleProjectGenerator.java`·`bench/ParseBenchmark.java`(신규, 테스트 소스), `SourceScannerTest.java`(신규)
+**관련 파일**: `JavaSourceScanner.java`(신규), `EntityParser.java`, `RepositoryParser.java`, `ServiceParser.java`, `ControllerParser.java`, `SchemaGuardCLI.java`, `lib/build.gradle`(`benchmark` 태스크), `bench/SampleProjectGenerator.java`·`bench/ParseBenchmark.java`(신규, 테스트 소스), `JavaSourceScannerTest.java`(신규)
 
 ---
 
@@ -1032,7 +1032,7 @@ FP 51건 중 50건은 그래프 탐색의 문제가 아닙니다. **변경 종�
 
 **변경**
 
-- `MigrationParser`
+- `SqlMigrationParser`
   - `ALTER TABLE ... RENAME TO ...`와 `RENAME TABLE a TO b[, c TO d]`를 `RENAME_TABLE`로 탐지합니다. 새 테이블명은 `newName`에 담깁니다.
   - `ALTER [COLUMN] col SET NOT NULL`은 `ADD_NOT_NULL`, `ALTER [COLUMN] col TYPE t` / `SET DATA TYPE t`는 `MODIFY_TYPE`으로 탐지합니다.
   - `DROP NOT NULL`, `SET/DROP DEFAULT`는 기존 코드를 깨지 않으므로 계속 무시합니다.
@@ -1043,7 +1043,7 @@ FP 51건 중 50건은 그래프 탐색의 문제가 아닙니다. **변경 종�
 - 샘플 프로젝트에서 `ALTER TABLE users RENAME TO members;` → `GET /me` HIGH, 종료 코드 1
 - `ALTER COLUMN email SET NOT NULL` → `GET /me` MEDIUM, 종료 코드 0 (MEDIUM은 차단하지 않음)
 
-**관련 파일**: `MigrationParser.java`, `ImpactAnalyzer.java`, `MigrationParserTest.java`, `SchemaGuardCLITest.java`
+**관련 파일**: `SqlMigrationParser.java`, `ImpactAnalyzer.java`, `SqlMigrationParserTest.java`, `SchemaGuardCLITest.java`
 
 ---
 
@@ -1139,7 +1139,7 @@ FP 51건 중 50건은 그래프 탐색의 문제가 아닙니다. **변경 종�
 
 **문제**
 
-- `MigrationParser`가 SQL 파일 전체를 `parseStatements` 한 번으로 파싱했습니다. 구문 하나만 실패해도 경고 한 줄을 찍고 빈 목록을 돌려줬습니다.
+- `SqlMigrationParser`가 SQL 파일 전체를 `parseStatements` 한 번으로 파싱했습니다. 구문 하나만 실패해도 경고 한 줄을 찍고 빈 목록을 돌려줬습니다.
 - CLI는 이를 "No schema changes detected"로 받아들여 **종료 코드 0**을 냈고, 위험한 변경이 있어도 PR이 통과했습니다.
 - 재현: 아래 파일을 넣으면 HIGH 3건이 모두 사라지고 종료 코드 0이 나왔습니다.
 
@@ -1172,4 +1172,4 @@ FP 51건 중 50건은 그래프 탐색의 문제가 아닙니다. **변경 종�
 
 - JSQLParser가 읽지 못하는 정상 구문(프로시저용 `DELIMITER` 블록 등)도 차단됩니다. 의도한 fail-closed 동작이므로 실제 마이그레이션 파일로 한 번 확인하는 것을 권장합니다.
 
-**관련 파일**: `MigrationParser.java`, `SchemaGuardCLI.java`, `MigrationParserTest.java`(신규)
+**관련 파일**: `SqlMigrationParser.java`, `SchemaGuardCLI.java`, `SqlMigrationParserTest.java`(신규)

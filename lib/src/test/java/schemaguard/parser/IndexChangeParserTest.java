@@ -33,13 +33,13 @@ class IndexChangeParserTest {
             CREATE UNIQUE INDEX uq_users_ext ON users (team_id, email);
             """;
 
-    private static MigrationParser.ParseResult parseWithHistory(String sql) {
+    private static SqlMigrationParser.ParseResult parseWithHistory(String sql) {
         IndexCatalog catalog = new IndexCatalog();
         catalog.applyAll(HISTORY);
-        return new MigrationParser(catalog).parseSQL(sql);
+        return new SqlMigrationParser(catalog).parseSQL(sql);
     }
 
-    private static SchemaChange only(MigrationParser.ParseResult r) {
+    private static SchemaChange only(SqlMigrationParser.ParseResult r) {
         assertFalse(r.hasFailures(), () -> "unexpected failures: " + r.failures());
         assertEquals(1, r.changes().size(), () -> r.changes().toString());
         return r.changes().get(0);
@@ -49,7 +49,7 @@ class IndexChangeParserTest {
 
     @Test
     void alterTableDropIndexIsNoLongerSilentlyIgnored() {
-        SchemaChange c = only(new MigrationParser().parseSQL("ALTER TABLE users DROP INDEX uq_users_email;"));
+        SchemaChange c = only(new SqlMigrationParser().parseSQL("ALTER TABLE users DROP INDEX uq_users_email;"));
         assertEquals(ChangeType.DROP_INDEX, c.getChangeType());
         assertEquals("users", c.getTableName());
         assertEquals("uq_users_email", c.getIndexName());
@@ -59,7 +59,7 @@ class IndexChangeParserTest {
 
     @Test
     void dropIndexOnTableIsNotATableDrop() {
-        SchemaChange c = only(new MigrationParser().parseSQL("DROP INDEX idx_users_email ON users;"));
+        SchemaChange c = only(new SqlMigrationParser().parseSQL("DROP INDEX idx_users_email ON users;"));
         assertEquals(ChangeType.DROP_INDEX, c.getChangeType());
         assertEquals("users", c.getTableName(), "ON 뒤의 테이블이 대상이다 (인덱스 이름이 아니라)");
         assertEquals("idx_users_email", c.getIndexName());
@@ -68,7 +68,7 @@ class IndexChangeParserTest {
     @Test
     void mysqlDropKeySynonymIsDetected() {
         // JSQLParser 4.7 은 DROP KEY 를 파싱하지 못한다 (전에는 종료 코드 3).
-        SchemaChange c = only(new MigrationParser().parseSQL("ALTER TABLE `users` DROP KEY `uq_users_email`;"));
+        SchemaChange c = only(new SqlMigrationParser().parseSQL("ALTER TABLE `users` DROP KEY `uq_users_email`;"));
         assertEquals(ChangeType.DROP_INDEX, c.getChangeType());
         assertEquals("users", c.getTableName());
         assertEquals("uq_users_email", c.getIndexName());
@@ -77,7 +77,7 @@ class IndexChangeParserTest {
     @Test
     void dropIndexWithoutTableAndUnknownDefinitionIsAnalysisFailure() {
         // PostgreSQL 형식. 어느 테이블의 인덱스인지 알 수 없으면 영향 경로를 찾을 수 없다 → "변경 없음"이 아니라 "알 수 없음".
-        MigrationParser.ParseResult r = new MigrationParser().parseSQL("DROP INDEX uq_users_email;");
+        SqlMigrationParser.ParseResult r = new SqlMigrationParser().parseSQL("DROP INDEX uq_users_email;");
         assertTrue(r.hasFailures());
         assertTrue(r.failures().get(0).reason().contains("uq_users_email"), r.failures().toString());
         assertTrue(r.changes().isEmpty());
@@ -86,21 +86,21 @@ class IndexChangeParserTest {
     @Test
     void unsupportedDropTargetIsAnalysisFailure() {
         // @SequenceGenerator 를 쓰는 INSERT 가 깨질 수 있다. 모르는 대상은 통과시키지 않는다.
-        MigrationParser.ParseResult r = new MigrationParser().parseSQL("DROP SEQUENCE users_seq;");
+        SqlMigrationParser.ParseResult r = new SqlMigrationParser().parseSQL("DROP SEQUENCE users_seq;");
         assertTrue(r.hasFailures());
     }
 
     @Test
     void dropViewKeepsTableDropSemantics() {
         // @Entity 가 뷰에 매핑될 수 있다. 뷰를 지우면 테이블을 지운 것과 같은 범위가 깨진다.
-        SchemaChange c = only(new MigrationParser().parseSQL("DROP VIEW user_summary;"));
+        SchemaChange c = only(new SqlMigrationParser().parseSQL("DROP VIEW user_summary;"));
         assertEquals(ChangeType.DROP_TABLE, c.getChangeType());
         assertEquals("user_summary", c.getTableName());
     }
 
     @Test
     void dropTableStillWorks() {
-        SchemaChange c = only(new MigrationParser().parseSQL("DROP TABLE IF EXISTS comments;"));
+        SchemaChange c = only(new SqlMigrationParser().parseSQL("DROP TABLE IF EXISTS comments;"));
         assertEquals(ChangeType.DROP_TABLE, c.getChangeType());
         assertEquals("comments", c.getTableName());
     }
@@ -110,7 +110,7 @@ class IndexChangeParserTest {
     @Test
     void createUniqueIndexIsAddUnique() {
         // 전에는 CREATE INDEX 계열을 전부 무시해서 ADD_UNIQUE 를 놓쳤다.
-        SchemaChange c = only(new MigrationParser().parseSQL("CREATE UNIQUE INDEX uq_e ON users (email, nickname);"));
+        SchemaChange c = only(new SqlMigrationParser().parseSQL("CREATE UNIQUE INDEX uq_e ON users (email, nickname);"));
         assertEquals(ChangeType.ADD_UNIQUE, c.getChangeType());
         assertEquals("users", c.getTableName());
         assertEquals("email", c.getColumnName());
@@ -119,7 +119,7 @@ class IndexChangeParserTest {
 
     @Test
     void createPlainIndexIsNotASchemaChange() {
-        MigrationParser.ParseResult r = new MigrationParser().parseSQL("CREATE INDEX idx_e ON users (email);");
+        SqlMigrationParser.ParseResult r = new SqlMigrationParser().parseSQL("CREATE INDEX idx_e ON users (email);");
         assertFalse(r.hasFailures());
         assertTrue(r.changes().isEmpty());
     }
@@ -127,7 +127,7 @@ class IndexChangeParserTest {
     @Test
     void addUniqueIndexKnowsItsColumn() {
         // 전에는 컬럼을 "unknown" 으로 기록했다.
-        SchemaChange c = only(new MigrationParser().parseSQL("ALTER TABLE users ADD UNIQUE INDEX uq_e (email);"));
+        SchemaChange c = only(new SqlMigrationParser().parseSQL("ALTER TABLE users ADD UNIQUE INDEX uq_e (email);"));
         assertEquals(ChangeType.ADD_UNIQUE, c.getChangeType());
         assertEquals("email", c.getColumnName());
         assertEquals("uq_e", c.getIndexName());
@@ -201,7 +201,7 @@ class IndexChangeParserTest {
 
     @Test
     void dropUniqueByColumnsIsDropUnique() {
-        SchemaChange c = only(new MigrationParser().parseSQL("ALTER TABLE users DROP UNIQUE (email);"));
+        SchemaChange c = only(new SqlMigrationParser().parseSQL("ALTER TABLE users DROP UNIQUE (email);"));
         assertEquals(ChangeType.DROP_UNIQUE, c.getChangeType());
         assertEquals("email", c.getColumnName());
     }
@@ -209,7 +209,7 @@ class IndexChangeParserTest {
     @Test
     void recreatingUniqueOnSameColumnsInSameFileIsCompatible() {
         // 인덱스 이름만 바꾸는 흔한 패턴. 중복을 막는 제약은 계속 있다.
-        MigrationParser.ParseResult r = parseWithHistory("""
+        SqlMigrationParser.ParseResult r = parseWithHistory("""
                 ALTER TABLE users DROP INDEX uq_users_nickname;
                 ALTER TABLE users ADD CONSTRAINT uq_nickname_team UNIQUE (team_id, nickname);
                 """);
@@ -223,7 +223,7 @@ class IndexChangeParserTest {
     void recreatingUniqueOnMoreColumnsIsLooserAndStillDropUnique() {
         // (email) → (email, team_id): 팀이 다르면 같은 email 을 허용한다. 기존 의미의 중복을 더 이상 막지 못한다.
         // 같은 컬럼 집합일 때만 상쇄한다.
-        MigrationParser.ParseResult r = parseWithHistory("""
+        SqlMigrationParser.ParseResult r = parseWithHistory("""
                 DROP INDEX email ON users;
                 CREATE UNIQUE INDEX uq_email_team ON users (email, team_id);
                 """);
@@ -233,7 +233,7 @@ class IndexChangeParserTest {
 
     @Test
     void indexCreatedEarlierInSameFileIsResolved() {
-        MigrationParser.ParseResult r = new MigrationParser(new IndexCatalog()).parseSQL("""
+        SqlMigrationParser.ParseResult r = new SqlMigrationParser(new IndexCatalog()).parseSQL("""
                 CREATE INDEX idx_tmp ON users (nickname);
                 DROP INDEX idx_tmp ON users;
                 """);

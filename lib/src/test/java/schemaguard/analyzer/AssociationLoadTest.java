@@ -103,7 +103,7 @@ class AssociationLoadTest {
     }
 
     private static Set<String> apis(DependencyGraphBuilder b, String sql) {
-        List<SchemaChange> changes = new MigrationParser().parseSQL(sql).changes();
+        List<SchemaChange> changes = new SqlMigrationParser().parseSQL(sql).changes();
         Set<String> ids = new TreeSet<>();
         new ImpactAnalyzer(b.getGraph(), b.getNodeIndex(), b.getFkFieldsReferencingTable())
                 .analyze(changes).getAffectedApis().forEach(a -> ids.add(a.getApiId()));
@@ -132,7 +132,7 @@ class AssociationLoadTest {
 
     @Test
     void impactPathShowsAssociationLoadNode() throws Exception {
-        List<SchemaChange> changes = new MigrationParser().parseSQL("ALTER TABLE users DROP COLUMN email;").changes();
+        List<SchemaChange> changes = new SqlMigrationParser().parseSQL("ALTER TABLE users DROP COLUMN email;").changes();
         DependencyGraphBuilder b = project();
         AffectedApi feed = new ImpactAnalyzer(b.getGraph(), b.getNodeIndex(), b.getFkFieldsReferencingTable())
                 .analyze(changes).getAffectedApis().stream()
