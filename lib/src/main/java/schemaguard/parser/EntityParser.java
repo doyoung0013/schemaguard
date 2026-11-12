@@ -94,7 +94,8 @@ public class EntityParser {
                             effectiveJavaType(field),
                             getAnnotationValue(field, "Column", "length").map(EntityParser::parseIntOrNull).orElse(null),
                             isNullable(field),
-                            getAnnotationValue(field, "Column", "unique").map(v -> v.trim().equals("true")).orElse(false)));
+                            getAnnotationValue(field, "Column", "unique").map(v -> v.trim().equals("true")).orElse(false),
+                            hasAnnotation(field, "Id")));
                 }
             }
         });

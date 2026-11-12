@@ -60,8 +60,23 @@ public class RepositoryInfo {
                 .findFirst().orElse(-1);
     }
 
-    public record MethodEntry(String name, int lineNumber, List<String> fetchPaths) {
+    /** 메서드 정보를 그대로 넣는다 (@Lock, @Query 여부 포함). */
+    public void addMethod(MethodEntry entry) {
+        methods.add(entry);
+    }
+
+    /**
+     * @param lockMode    @Lock(LockModeType.PESSIMISTIC_*) 의 모드 이름 (PESSIMISTIC_WRITE 등). 비관적 락이 아니면 null
+     * @param query       @Query 의 쿼리 문자열. 없으면 null (메서드 이름이 조회 조건이다)
+     * @param nativeQuery @Query(nativeQuery = true)
+     */
+    public record MethodEntry(String name, int lineNumber, List<String> fetchPaths, String lockMode,
+                              String query, boolean nativeQuery) {
         public MethodEntry(String name, int lineNumber) { this(name, lineNumber, List.of()); }
+        public MethodEntry(String name, int lineNumber, List<String> fetchPaths) { this(name, lineNumber, fetchPaths, null, null, false); }
         public MethodEntry { fetchPaths = List.copyOf(fetchPaths); }
+
+        public boolean isPessimisticLock() { return lockMode != null; }
+        public boolean hasQuery()          { return query != null; }
     }
 }

@@ -34,8 +34,10 @@ public class IndexCatalog {
     private int appliedStatements;
     private int failedStatements;
     private int files;
+    /** 이력에서 CREATE TABLE 로 본 테이블. 인덱스가 하나도 없어도 "아는 테이블"이다. */
+    private final Set<String> createdTables = new TreeSet<>();
 
-    /** Flyway 버전 순서로 정렬된 이전 마이그레이션 파일을 적용한다. 읽지 못하는 파일은 건너뛴다. */
+    /** 파일 이름의 V 번호 순서로 정렬된 이전 마이그레이션 파일을 적용한다. 읽지 못하는 파일은 건너뛴다. */
     public static IndexCatalog load(List<File> history) {
         IndexCatalog c = new IndexCatalog();
         for (File f : history) {
@@ -55,6 +57,7 @@ public class IndexCatalog {
         c.appliedStatements = appliedStatements;
         c.failedStatements = failedStatements;
         c.files = files;
+        c.createdTables.addAll(createdTables);
         return c;
     }
 
@@ -70,6 +73,17 @@ public class IndexCatalog {
         List<IndexDef> out = new ArrayList<>();
         byTable.values().forEach(defs -> defs.stream().filter(d -> d.answersTo(indexName)).forEach(out::add));
         return out;
+    }
+
+    /** 테이블의 인덱스·제약 전체 (PRIMARY KEY, UNIQUE, 일반 인덱스, FK). */
+    public List<IndexDef> indexesOf(String table) {
+        return List.copyOf(byTable.getOrDefault(lower(table), List.of()));
+    }
+
+    /** 이력에 이 테이블의 정의(CREATE TABLE 또는 인덱스)가 있는지. 없으면 남은 인덱스를 이력으로 판단할 수 없다. */
+    public boolean knowsTable(String table) {
+        String t = lower(table);
+        return createdTables.contains(t) || !byTable.getOrDefault(t, List.of()).isEmpty();
     }
 
     public Optional<IndexDef> primaryKey(String table) {
@@ -134,6 +148,7 @@ public class IndexCatalog {
     private void applyCreateTable(CreateTable ct, String origin) {
         String table = SqlMigrationParser.ident(ct.getTable().getName());
         byTable.remove(table);   // CREATE TABLE 은 새 테이블이다 (같은 이름을 지우고 다시 만든 경우)
+        createdTables.add(lower(table));
         if (ct.getColumnDefinitions() != null) {
             for (ColumnDefinition cd : ct.getColumnDefinitions()) {
                 String spec = cd.getColumnSpecs() == null ? "" : " " + String.join(" ", cd.getColumnSpecs()).toUpperCase() + " ";
@@ -204,6 +219,7 @@ public class IndexCatalog {
         String name = SqlMigrationParser.ident(drop.getName().getName());
         if (type.equals("TABLE") || type.equals("VIEW")) {
             byTable.remove(name);
+            createdTables.remove(lower(name));
         } else if (type.equals("INDEX")) {
             String table = SqlMigrationParser.dropIndexTable(drop);
             if (table != null) remove(table, name);
@@ -262,6 +278,7 @@ public class IndexCatalog {
     }
 
     private void renameTable(String from, String to) {
+        if (createdTables.remove(lower(from))) createdTables.add(lower(to));
         List<IndexDef> defs = byTable.remove(from);
         if (defs == null) return;
         List<IndexDef> moved = new ArrayList<>();

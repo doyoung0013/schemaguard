@@ -12,6 +12,7 @@ public class EntityMapping {
     private final Integer length;     // @Column(length), 지정 안 했으면 null (JPA 기본 255)
     private final boolean nullable;   // @Column(nullable = false) / 기본형 / @Id 이면 false
     private final boolean unique;     // @Column(unique = true)
+    private final boolean id;         // @Id (기본키 컬럼)
 
     public EntityMapping(String entityClass, String fieldName,
                          String tableName,  String columnName) {
@@ -35,6 +36,14 @@ public class EntityMapping {
                          String tableName,  String columnName,
                          String filePath,   int lineNumber,
                          String javaType,   Integer length, boolean nullable, boolean unique) {
+        this(entityClass, fieldName, tableName, columnName, filePath, lineNumber, javaType, length, nullable, unique, false);
+    }
+
+    public EntityMapping(String entityClass, String fieldName,
+                         String tableName,  String columnName,
+                         String filePath,   int lineNumber,
+                         String javaType,   Integer length, boolean nullable, boolean unique, boolean id) {
+        this.id          = id;
         this.unique      = unique;
         this.javaType    = javaType;
         this.length      = length;
@@ -57,6 +66,7 @@ public class EntityMapping {
     public Integer getLength()     { return length; }
     public boolean isNullable()    { return nullable; }
     public boolean isUnique()      { return unique; }
+    public boolean isId()          { return id; }
 
     public String getFieldNodeId()  { return "field:" + entityClass + "." + fieldName; }
     public String getColumnNodeId() { return "col:"   + tableName   + "." + columnName; }

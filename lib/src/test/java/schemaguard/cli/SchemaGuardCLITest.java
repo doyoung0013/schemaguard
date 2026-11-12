@@ -214,7 +214,7 @@ class SchemaGuardCLITest {
     // ── 인덱스·UNIQUE 삭제 ─────────────────────────────────────────────────────
     // 고치기 전에는 아래 마이그레이션이 모두 종료 코드 0으로 통과했다.
 
-    /** V2__test.sql 과 같은 폴더의 이전 마이그레이션. MigrationHistory 가 버전 순서로 읽는다. */
+    /** V2__test.sql 과 같은 폴더의 이전 마이그레이션. --history 를 주면 V 번호 순서로 읽는다. */
     private void history(String name, String content) throws IOException {
         Files.writeString(tmp.resolve(name), content);
     }
@@ -229,7 +229,7 @@ class SchemaGuardCLITest {
                 """);
         Path report = tmp.resolve("report.json");
 
-        int code = run(sql("DROP INDEX email ON users;"), "--report-path", report.toString());
+        int code = run(sql("DROP INDEX email ON users;"), "--report-path", report.toString(), "--history", tmp.toString());
 
         assertEquals(SchemaGuardCLI.EXIT_HIGH_RISK, code);
         JsonNode json = readJson(report);
@@ -251,7 +251,8 @@ class SchemaGuardCLITest {
                 """);
         Path report = tmp.resolve("report.json");
 
-        int code = run(sql("ALTER TABLE users DROP INDEX idx_users_email;"), "--report-path", report.toString());
+        int code = run(sql("ALTER TABLE users DROP INDEX idx_users_email;"), "--report-path", report.toString(),
+                "--history", tmp.toString());
 
         assertEquals(SchemaGuardCLI.EXIT_OK, code);
         assertEquals(0, readJson(report).at("/affectedApis").size());
@@ -286,9 +287,68 @@ class SchemaGuardCLITest {
         history("V3__later.sql", "CREATE INDEX idx_users_email ON users (email);");
         Path report = tmp.resolve("report.json");
 
-        int code = run(sql("DROP INDEX idx_users_email ON users;"), "--report-path", report.toString());
+        int code = run(sql("DROP INDEX idx_users_email ON users;"), "--report-path", report.toString(),
+                "--history", tmp.toString());
 
         assertEquals(SchemaGuardCLI.EXIT_HIGH_RISK, code);
+    }
+
+    @Test
+    void historyIsNotReadWithoutHistoryOption() throws IOException {
+        // 같은 폴더에 V1 이 있어도 --history 가 없으면 읽지 않는다 → 정의를 모르는 인덱스로 보수적으로 차단
+        history("V1__init.sql", """
+                CREATE TABLE users (id BIGINT PRIMARY KEY, email VARCHAR(100));
+                CREATE INDEX idx_users_email ON users (email);
+                """);
+        Path report = tmp.resolve("report.json");
+
+        int code = run(sql("ALTER TABLE users DROP INDEX idx_users_email;"), "--report-path", report.toString());
+
+        assertEquals(SchemaGuardCLI.EXIT_HIGH_RISK, code);
+        JsonNode json = readJson(report);
+        assertEquals("DROP_UNIQUE", json.at("/affectedApis/0/cause/type").asText());
+        assertTrue(json.at("/affectedApis/0/cause/note").asText().contains("--history"),
+                json.at("/affectedApis/0/cause/note").asText());
+    }
+
+    @Test
+    void historyCanComeFromAnotherFolder() throws IOException {
+        Path dir = tmp.resolve("db/migration");
+        Files.createDirectories(dir);
+        Files.writeString(dir.resolve("V1__init.sql"), """
+                CREATE TABLE users (id BIGINT PRIMARY KEY, email VARCHAR(100));
+                CREATE INDEX idx_users_email ON users (email);
+                """);
+        Path report = tmp.resolve("report.json");
+
+        // 검사 파일(tmp/V2__test.sql)은 이력 폴더 밖에 있다. 번호만 비교한다.
+        int code = run(sql("ALTER TABLE users DROP INDEX idx_users_email;"), "--report-path", report.toString(),
+                "--history", dir.toString());
+
+        assertEquals(SchemaGuardCLI.EXIT_OK, code);
+        assertEquals("DROP_INDEX", readJson(report).at("/parse/detectedChanges/0").asText().replaceAll(".*] (\\w+).*", "$1"));
+    }
+
+    @Test
+    void fileWithoutVNumberHasNoHistoryEvenWithOption() throws IOException {
+        history("V1__init.sql", "CREATE TABLE users (id BIGINT PRIMARY KEY, email VARCHAR(100));\n"
+                + "CREATE INDEX idx_users_email ON users (email);");
+        Path migration = tmp.resolve("drop_index.sql");
+        Files.writeString(migration, "ALTER TABLE users DROP INDEX idx_users_email;");
+        Path report = tmp.resolve("report.json");
+
+        int code = run(migration, "--report-path", report.toString(), "--history", tmp.toString());
+
+        assertEquals(SchemaGuardCLI.EXIT_HIGH_RISK, code);   // 앞선 파일을 알 수 없다 → 정의 모름
+    }
+
+    @Test
+    void missingHistoryFolderExitsTwo() throws IOException {
+        Path report = tmp.resolve("report.json");
+        int code = run(sql("ALTER TABLE users ADD COLUMN age INT;"), "--report-path", report.toString(),
+                "--history", tmp.resolve("nope").toString());
+        assertEquals(SchemaGuardCLI.EXIT_ERROR, code);
+        assertFalse(Files.exists(report));
     }
 
     @Test

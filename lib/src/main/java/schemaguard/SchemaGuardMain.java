@@ -8,6 +8,7 @@ import picocli.CommandLine;
  *
  * 실행:
  *   java -jar schemaguard.jar --source <소스경로> --migration <SQL파일경로>
+ *   java -jar schemaguard.jar --source <소스경로> --migration <SQL파일|폴더> [...] --report-dir <리포트폴더>
  *   java -jar schemaguard.jar --help
  */
 public class SchemaGuardMain {

@@ -27,7 +27,7 @@ class MigrationHistoryTest {
     }
 
     @Test
-    void earlierVersionsInFlywayOrder() throws IOException {
+    void earlierFilesInVNumberOrder() throws IOException {
         touch("V1__init.sql");
         touch("V1_1__fix.sql");
         touch("V2.sql");                 // community 처럼 설명 없는 이름
@@ -46,6 +46,19 @@ class MigrationHistoryTest {
         touch("V1.10__b.sql");
         File current = touch("V1.11__c.sql");
         assertEquals(List.of("V0.sql", "V1.2__a.sql", "V1.10__b.sql"), names(MigrationHistory.earlierThan(current)));
+    }
+
+    @Test
+    void historyFolderCanDifferFromMigrationFolder() throws IOException {
+        touch("V1__init.sql");
+        touch("V5__later.sql");
+        Path other = dir.resolve("pr");
+        Files.createDirectories(other);
+        Path current = other.resolve("V3__current.sql");
+        Files.writeString(current, "-- current");
+        assertEquals(List.of("V1__init.sql"), names(MigrationHistory.earlierThan(current.toFile(), dir.toFile())));
+        assertTrue(MigrationHistory.hasVersion(current.toFile()));
+        assertFalse(MigrationHistory.hasVersion(new File("R__views.sql")));
     }
 
     @Test
