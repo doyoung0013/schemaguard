@@ -17,6 +17,12 @@ import java.util.*;
  *   그 외 호환 (같은 타입, 같거나 큰 길이)      → MODIFY_COMPATIBLE  LOW    (영향 없음)
  *   엔티티가 쓰지 않는 컬럼에 FK 추가           → MODIFY_COMPATIBLE  LOW    (앱은 항상 NULL → FK 위반 없음)
  *   매핑을 모르는 컬럼/타입                    → 그대로 (보수적으로 HIGH)
+ *
+ * 인덱스 삭제 중 이전 마이그레이션에서 정의를 찾지 못한 것은 엔티티 선언으로 마저 분류한다.
+ *   @Table(uniqueConstraints / indexes(unique = true)) 이름이 같음 → DROP_UNIQUE HIGH
+ *   @Table(indexes) 이름이 같은 일반 인덱스                         → DROP_INDEX  LOW
+ *   이름이 @Column(unique = true) 컬럼 이름과 같음 (MySQL 의 이름)  → DROP_UNIQUE HIGH
+ *   그래도 모름                                                    → DROP_UNIQUE HIGH (UNIQUE 일 수 있으므로 보수적으로)
  */
 public class ChangeClassifier {
 
@@ -37,6 +43,14 @@ public class ChangeClassifier {
     public List<SchemaChange> classify(List<SchemaChange> changes,
                                        List<EntityMapping> entities,
                                        List<FkMapping> fkMappings) {
+        return classify(changes, entities, fkMappings, List.of());
+    }
+
+    /** @param entityIndexes 엔티티 @Table 의 uniqueConstraints / indexes 선언 */
+    public List<SchemaChange> classify(List<SchemaChange> changes,
+                                       List<EntityMapping> entities,
+                                       List<FkMapping> fkMappings,
+                                       List<IndexDef> entityIndexes) {
         Map<String, EntityMapping> byColumn = new HashMap<>();
         for (EntityMapping em : entities)
             byColumn.putIfAbsent(em.getTableName() + "." + em.getColumnName(), em);
@@ -55,6 +69,9 @@ public class ChangeClassifier {
             switch (c.getChangeType()) {
                 case MODIFY_TYPE -> out.addAll(classifyModify(c, em));
                 case ADD_NOT_NULL -> out.add(classifyNotNull(c, em));
+                case DROP_INDEX -> out.add(c.getIndexColumns() == null
+                        ? classifyUnknownIndex(c, entities, entityIndexes) : c);
+                case DROP_UNIQUE -> out.add(noteEntityStillUnique(c, entities, entityIndexes));
                 case ADD_FOREIGN_KEY -> {
                     String key = c.getTableName() + "." + c.getColumnName();
                     boolean appWrites = byColumn.containsKey(key) || joinColumns.contains(key);
@@ -126,6 +143,61 @@ public class ChangeClassifier {
         }
         return c;
     }
+
+    private SchemaChange classifyUnknownIndex(SchemaChange c, List<EntityMapping> entities, List<IndexDef> entityIndexes) {
+        String table = c.getTableName();
+        String name = c.getIndexName();
+
+        Optional<IndexDef> declared = entityIndexes.stream()
+                .filter(d -> table.equals(d.table()) && d.answersTo(name)).findFirst();
+        if (declared.isPresent()) {
+            IndexDef d = declared.get();
+            String cols = String.join(", ", d.columns());
+            return d.enforcesUniqueness()
+                    ? noteEntityStillUnique(c.resolvedIndex(table, d.columns(), ChangeType.DROP_UNIQUE, RiskLevel.HIGH,
+                            "UNIQUE (" + cols + ") 삭제 (정의: " + d.origin() + "): " + DUPLICATES), entities, entityIndexes)
+                    : c.resolvedIndex(table, d.columns(), ChangeType.DROP_INDEX, RiskLevel.LOW,
+                            "일반 인덱스 (" + cols + ") 삭제 (정의: " + d.origin() + "): 쿼리는 깨지지 않고 조회 성능만 영향");
+        }
+
+        Optional<EntityMapping> uniqueColumn = entities.stream()
+                .filter(m -> m.isUnique() && table.equals(m.getTableName()) && m.getColumnName().equalsIgnoreCase(name))
+                .findFirst();
+        if (uniqueColumn.isPresent()) {
+            EntityMapping m = uniqueColumn.get();
+            return c.resolvedIndex(table, List.of(m.getColumnName()), ChangeType.DROP_UNIQUE, RiskLevel.HIGH,
+                    "UNIQUE (" + m.getColumnName() + ") 삭제: 엔티티 " + m.getEntityClass() + "." + m.getFieldName()
+                            + " 가 @Column(unique = true) 이고 MySQL 은 이 인덱스 이름을 컬럼 이름으로 만든다. " + DUPLICATES);
+        }
+
+        return c.reclassify(ChangeType.DROP_UNIQUE, RiskLevel.HIGH,
+                "인덱스 " + name + " 의 정의를 이전 마이그레이션과 엔티티에서 찾지 못함: UNIQUE 인지 알 수 없어 보수적으로 UNIQUE 로 간주. "
+                        + "일반 인덱스라면 이 경고는 무시해도 됨");
+    }
+
+    /** 엔티티가 여전히 같은 컬럼을 unique 로 선언하면 코드와 DB 가 어긋난다는 것을 근거에 덧붙인다. */
+    private static SchemaChange noteEntityStillUnique(SchemaChange c, List<EntityMapping> entities, List<IndexDef> entityIndexes) {
+        List<String> cols = c.getIndexColumns();
+        if (cols == null || cols.isEmpty()) return c;
+        String table = c.getTableName();
+        IndexDef dropped = new IndexDef(table, null, null, cols, IndexDef.Kind.UNIQUE, null);
+
+        List<String> still = new ArrayList<>();
+        if (cols.size() == 1) {
+            entities.stream()
+                    .filter(m -> m.isUnique() && table.equals(m.getTableName()) && m.getColumnName().equalsIgnoreCase(cols.get(0)))
+                    .forEach(m -> still.add(m.getEntityClass() + "." + m.getFieldName() + " @Column(unique = true)"));
+        }
+        entityIndexes.stream()
+                .filter(d -> d.enforcesUniqueness() && table.equals(d.table()) && dropped.sameColumnsAs(d.columns()))
+                .forEach(d -> still.add(d.origin()));
+        if (still.isEmpty()) return c;
+        String base = c.getNote() == null ? "" : c.getNote() + ". ";
+        return c.reclassify(c.getChangeType(), c.getRiskLevel(),
+                base + "엔티티 " + String.join(", ", still) + " 는 아직 unique 로 선언되어 있어 코드와 DB 가 어긋남");
+    }
+
+    private static final String DUPLICATES = "같은 값을 저장해도 오류 없이 성공함. 이 제약으로 중복을 막던 저장 경로 확인 필요";
 
     private static boolean isStringJava(String java) {
         return java.equals("String") || java.equals("char") || java.equals("Character");

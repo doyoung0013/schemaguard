@@ -71,7 +71,8 @@ public class ImpactAnalyzer {
 
     private static boolean isWriteScope(SchemaChange change) {
         return switch (change.getChangeType()) {
-            case ADD_NOT_NULL, ADD_UNIQUE, NARROW_COLUMN, ADD_FOREIGN_KEY, MODIFY_FK_REFERENCE -> true;
+            case ADD_NOT_NULL, ADD_UNIQUE, NARROW_COLUMN, ADD_FOREIGN_KEY, MODIFY_FK_REFERENCE, DROP_UNIQUE -> true;
+            case DROP_INDEX -> change.getIndexColumns() == null;
             default -> false;
         };
     }
@@ -88,6 +89,14 @@ public class ImpactAnalyzer {
             //   NOT NULL/UNIQUE 추가, 길이·범위 축소, FK 추가·참조 변경은 기존 값을 읽는 데는 영향이 없다.
             case ADD_NOT_NULL, ADD_UNIQUE, NARROW_COLUMN, ADD_FOREIGN_KEY, MODIFY_FK_REFERENCE ->
                     writeMethodsByTable.getOrDefault(change.getTableName(), List.of());
+
+            // UNIQUE 삭제: 오류는 나지 않고, 그 테이블에 저장하는 경로에서 중복이 조용히 들어간다.
+            case DROP_UNIQUE -> writeMethodsByTable.getOrDefault(change.getTableName(), List.of());
+
+            // 일반 인덱스 삭제는 쿼리를 깨지 않는다. 정의를 모르는 인덱스(ChangeClassifier 를 거치지 않은 경우)는 UNIQUE 로 본다.
+            case DROP_INDEX -> change.getIndexColumns() == null
+                    ? writeMethodsByTable.getOrDefault(change.getTableName(), List.of())
+                    : List.of();
 
             // 영향 없음: FK 제약 삭제(무결성만 약해짐), 엔티티와 호환되는 타입 변경, 컬럼 추가
             case DROP_FOREIGN_KEY, MODIFY_COMPATIBLE, ADD_COLUMN -> List.of();

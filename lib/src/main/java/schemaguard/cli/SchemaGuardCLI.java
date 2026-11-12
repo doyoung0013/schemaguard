@@ -71,7 +71,17 @@ public class SchemaGuardCLI implements Callable<Integer> {
             System.out.println("  Migration : " + migrationPath);
             System.out.println();
 
-            MigrationParser migrationParser = new MigrationParser();
+            // DROP INDEX 에는 이름만 있다. 이전 마이그레이션에서 인덱스 정의(컬럼, UNIQUE 여부)를 알아 둔다.
+            List<File> history = MigrationHistory.earlierThan(new File(migrationPath));
+            IndexCatalog catalog = IndexCatalog.load(history);
+            if (!history.isEmpty()) {
+                System.out.printf("Migration history: %d earlier file(s), %d index/constraint definition(s)%s%n",
+                        catalog.files(), catalog.size(),
+                        catalog.failedStatements() > 0
+                                ? ", " + catalog.failedStatements() + " statement(s) skipped (unparseable)" : "");
+            }
+
+            MigrationParser migrationParser = new MigrationParser(catalog);
             MigrationParser.ParseResult parsed = migrationParser.parse(new File(migrationPath));
             List<SchemaChange> changes = parsed.changes();
 
@@ -140,7 +150,8 @@ public class SchemaGuardCLI implements Callable<Integer> {
         long t3 = System.nanoTime();
 
         // SQL 만 보고 정한 분류를 코드(엔티티 매핑)가 기대하는 스키마와 비교해 다시 정한다.
-        List<SchemaChange> classified = new ChangeClassifier().classify(changes, scan.entities(), scan.fkMappings());
+        List<SchemaChange> classified = new ChangeClassifier()
+                .classify(changes, scan.entities(), scan.fkMappings(), scan.entityIndexes());
         classifiedOut.addAll(classified);
         printReclassified(changes, classified);
 

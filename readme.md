@@ -627,6 +627,8 @@ schemaguard/
 | FK 컬럼 삭제/변경 | 🔴 HIGH | `@JoinColumn`, `@ManyToOne` 등 연관관계 매핑 깨짐 |
 | nullable → not null | 🟡 MEDIUM | INSERT/UPDATE 시 null 값 오류 |
 | unique 제약 추가 | 🟡 MEDIUM | 중복 데이터 INSERT/UPDATE 시 제약 위반 |
+| UNIQUE 제약·인덱스 삭제 | 🔴 HIGH | 오류 없이 중복 데이터가 저장됨 (중복 가입·중복 지급 등) |
+| 일반 인덱스 삭제 | 🟢 LOW | 쿼리는 깨지지 않음 (조회 성능만 영향) |
 | 컬럼 추가 | 🟢 LOW | 기존 코드에 영향 없음 |
 
 ---

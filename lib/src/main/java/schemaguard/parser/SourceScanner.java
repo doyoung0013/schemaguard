@@ -11,6 +11,7 @@ import com.github.javaparser.symbolsolver.resolution.typesolvers.ReflectionTypeS
 import schemaguard.model.ControllerInfo;
 import schemaguard.model.EntityMapping;
 import schemaguard.model.FkMapping;
+import schemaguard.model.IndexDef;
 import schemaguard.model.RepositoryInfo;
 import schemaguard.model.ServiceInfo;
 
@@ -34,7 +35,14 @@ public class SourceScanner {
                          List<ServiceInfo> services,
                          List<ControllerInfo> controllers,
                          List<String> failedFiles,
-                         int parseCalls) {}
+                         int parseCalls,
+                         List<IndexDef> entityIndexes) {   // @Table 의 uniqueConstraints / indexes
+        public Result(List<EntityMapping> entities, List<FkMapping> fkMappings, List<RepositoryInfo> repositories,
+                      List<ServiceInfo> services, List<ControllerInfo> controllers, List<String> failedFiles,
+                      int parseCalls) {
+            this(entities, fkMappings, repositories, services, controllers, failedFiles, parseCalls, List.of());
+        }
+    }
 
     private final EntityParser entityParser = new EntityParser();
     private final RepositoryParser repositoryParser = new RepositoryParser();
@@ -55,6 +63,7 @@ public class SourceScanner {
         JavaParser parser = newParser(sourceRoot);
         List<EntityMapping> entities = new ArrayList<>();
         List<FkMapping> fkMappings = new ArrayList<>();
+        List<IndexDef> entityIndexes = new ArrayList<>();
         List<RepositoryInfo> repos = new ArrayList<>();
         List<ServiceInfo> services = new ArrayList<>();
         List<ControllerInfo> controllers = new ArrayList<>();
@@ -74,6 +83,7 @@ public class SourceScanner {
                 EntityParser.ParseResult pr = entityParser.parse(cu, path);
                 entities.addAll(pr.entityMappings());
                 fkMappings.addAll(pr.fkMappings());
+                entityIndexes.addAll(pr.indexes());
 
                 repos.addAll(repositoryParser.parse(cu, path));
                 services.addAll(serviceParser.parse(cu, path));
@@ -85,7 +95,7 @@ public class SourceScanner {
             }
         }
 
-        return new Result(entities, fkMappings, repos, services, controllers, failed, parseCalls);
+        return new Result(entities, fkMappings, repos, services, controllers, failed, parseCalls, entityIndexes);
     }
 
     /** getter 체인 루트 타입 해석 건수 {선언, 추론, symbol solver, 해석 실패} */

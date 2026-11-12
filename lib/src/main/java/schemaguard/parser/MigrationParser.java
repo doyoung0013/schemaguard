@@ -9,7 +9,9 @@ import net.sf.jsqlparser.statement.Statement;
 import net.sf.jsqlparser.statement.alter.Alter;
 import net.sf.jsqlparser.statement.alter.AlterExpression;
 import net.sf.jsqlparser.statement.alter.RenameTableStatement;
+import net.sf.jsqlparser.statement.create.index.CreateIndex;
 import net.sf.jsqlparser.statement.drop.Drop;
+import schemaguard.model.IndexDef;
 
 import java.io.File;
 import java.nio.file.Files;
@@ -27,7 +29,10 @@ import java.util.regex.Pattern;
  * 호출 측(CLI)은 실패가 하나라도 있으면 "분석 불완전"으로 보고 통과시키지 않아야 한다.
  *
  * JSQLParser가 일부 MySQL FK DDL 문법을 파싱하지 못하는 문제를 보완하기 위해
- * DROP FOREIGN KEY / ADD FOREIGN KEY 구문은 정규식으로 먼저 처리한다.
+ * DROP FOREIGN KEY / ADD FOREIGN KEY / DROP KEY 구문은 정규식으로 먼저 처리한다.
+ *
+ * 인덱스·제약 삭제(DROP INDEX, DROP CONSTRAINT)는 이름만 있어서 IndexCatalog(이전 마이그레이션)로 정의를 찾는다.
+ * 파일 안의 구문도 순서대로 카탈로그에 반영하므로, 같은 파일에서 만들고 지운 인덱스도 찾는다.
  */
 public class MigrationParser {
 
@@ -35,17 +40,23 @@ public class MigrationParser {
     private static final String IDENT = "([`\"\\w.]+)";
 
     /** ALTER TABLE t DROP FOREIGN KEY fk_name */
-    private static final Pattern DROP_FK_PATTERN = Pattern.compile(
+    static final Pattern DROP_FK_PATTERN = Pattern.compile(
             "ALTER\\s+TABLE\\s+" + IDENT + "\\s+DROP\\s+FOREIGN\\s+KEY\\s+" + IDENT + "\\s*",
             Pattern.CASE_INSENSITIVE
     );
 
     /** ALTER TABLE t ADD [CONSTRAINT name] FOREIGN KEY (col) REFERENCES ref(rc) [ON DELETE|UPDATE ...] */
-    private static final Pattern ADD_FK_PATTERN = Pattern.compile(
+    static final Pattern ADD_FK_PATTERN = Pattern.compile(
             "ALTER\\s+TABLE\\s+" + IDENT + "\\s+ADD\\s+(?:CONSTRAINT\\s+" + IDENT + "\\s+)?" +
                     "FOREIGN\\s+KEY\\s*\\(([^)]+)\\)\\s+REFERENCES\\s+" + IDENT + "\\s*\\(([^)]+)\\)" +
                     "(?:\\s+ON\\s+(?:DELETE|UPDATE)\\s+" +
                     "(?:CASCADE|RESTRICT|SET\\s+NULL|SET\\s+DEFAULT|NO\\s+ACTION))*\\s*",
+            Pattern.CASE_INSENSITIVE
+    );
+
+    /** ALTER TABLE t DROP INDEX|KEY name. JSQLParser 4.7 은 DROP KEY 를 파싱하지 못한다. */
+    static final Pattern DROP_INDEX_ALTER_PATTERN = Pattern.compile(
+            "ALTER\\s+TABLE\\s+" + IDENT + "\\s+DROP\\s+(?:INDEX|KEY)\\s+" + IDENT + "\\s*",
             Pattern.CASE_INSENSITIVE
     );
 
@@ -71,6 +82,20 @@ public class MigrationParser {
 
     private record SqlStatement(int line, String text) {}
 
+    /** 이전 마이그레이션에서 알아 둔 인덱스·제약. 파싱할 때마다 복사해서 쓰고, 원본은 바꾸지 않는다. */
+    private final IndexCatalog history;
+    /** parseSQL 한 번 동안 쓰는 카탈로그 (history + 이 파일의 앞선 구문) */
+    private IndexCatalog catalog;
+
+    /** 이전 마이그레이션을 모를 때. 인덱스 삭제는 엔티티 선언으로 분류하거나, 그래도 모르면 보수적으로 본다. */
+    public MigrationParser() {
+        this(new IndexCatalog());
+    }
+
+    public MigrationParser(IndexCatalog history) {
+        this.history = history;
+    }
+
     public ParseResult parse(File sqlFile) throws Exception {
         return parseSQL(Files.readString(sqlFile.toPath()));
     }
@@ -79,16 +104,20 @@ public class MigrationParser {
         List<SchemaChange> changes = new ArrayList<>();
         List<ParseFailure> failures = new ArrayList<>();
         List<SqlStatement> statements = splitStatements(sql);
+        catalog = history.copy();
 
         for (SqlStatement stmt : statements) {
             try {
                 changes.addAll(parseStatement(stmt.text()));
+                // 변경은 이 구문 "이전" 스키마로 판단하고, 그다음에 반영한다 (DROP INDEX 는 지우기 전 정의를 봐야 한다).
+                catalog.apply(stmt.text(), "this migration");
             } catch (Exception e) {
                 failures.add(new ParseFailure(stmt.line(), stmt.text(), firstLine(e)));
             }
         }
 
         promoteFkModify(changes);
+        cancelUniqueRecreate(changes);
 
         return new ParseResult(changes, failures, statements.size());
     }
@@ -124,12 +153,20 @@ public class MigrationParser {
             ));
         }
 
+        Matcher dropIndex = DROP_INDEX_ALTER_PATTERN.matcher(sql);
+        if (dropIndex.matches()) {
+            return List.of(indexDrop(ident(dropIndex.group(1)), ident(dropIndex.group(2))));
+        }
+
         Statement stmt = CCJSqlParserUtil.parse(sql);
         if (stmt instanceof Alter alter) {
             return handleAlter(alter);
         }
         if (stmt instanceof Drop drop) {
             return List.of(handleDrop(drop));
+        }
+        if (stmt instanceof CreateIndex ci) {
+            return handleCreateIndex(ci);
         }
         if (stmt instanceof RenameTableStatement rename) {
             // MySQL: RENAME TABLE a TO b [, c TO d]
@@ -146,6 +183,11 @@ public class MigrationParser {
             return result;
         }
         return List.of();
+    }
+
+    /** 구문 텍스트만 (IndexCatalog 가 이전 마이그레이션을 적용할 때 쓴다). */
+    static List<String> splitStatementTexts(String sql) {
+        return splitStatements(sql).stream().map(SqlStatement::text).toList();
     }
 
     /**
@@ -287,7 +329,32 @@ public class MigrationParser {
                                 type,
                                 RiskLevel.HIGH
                         ));
+                    } else if (expr.getIndex() != null && expr.getIndex().getName() != null) {
+                        // DROP INDEX name (전에는 컬럼 이름이 없다는 이유로 그냥 지나갔다)
+                        result.add(indexDrop(table, ident(expr.getIndex().getName())));
+                    } else if (expr.getConstraintName() != null) {
+                        // DROP CONSTRAINT name: UNIQUE 일 수도, FK(PostgreSQL)일 수도, CHECK 일 수도 있다
+                        result.add(indexDrop(table, ident(expr.getConstraintName())));
+                    } else {
+                        throw new IllegalArgumentException("Unrecognized ALTER TABLE DROP clause: " + expr);
                     }
+                }
+
+                case "DROP_UNIQUE" -> {
+                    // ALTER TABLE t DROP UNIQUE (a, b): JSQLParser 는 컬럼을 pkColumns 에 담는다
+                    List<String> cols = expr.getPkColumns() == null ? List.of()
+                            : expr.getPkColumns().stream().map(MigrationParser::ident).toList();
+                    result.add(dropUnique(table, null, cols, "UNIQUE (" + String.join(", ", cols) + ") 삭제"));
+                }
+
+                case "DROP_PRIMARY_KEY" -> {
+                    List<String> cols = catalog.primaryKey(table).map(IndexDef::columns).orElse(null);
+                    result.add(cols == null
+                            ? new SchemaChange(table, null, ChangeType.DROP_UNIQUE, RiskLevel.HIGH)
+                                    .withIndex("primary", List.of())
+                                    .reclassify(ChangeType.DROP_UNIQUE, RiskLevel.HIGH,
+                                            "PRIMARY KEY 삭제: 같은 id 를 가진 행을 DB 가 막지 않음")
+                            : dropUnique(table, "primary", cols, "PRIMARY KEY 삭제"));
                 }
 
                 case "RENAME" -> {
@@ -347,12 +414,13 @@ public class MigrationParser {
 
                 case "ADD" -> {
                     if (exprStr.contains("UNIQUE")) {
+                        List<String> cols = uniqueColumns(expr);
                         result.add(new SchemaChange(
                                 table,
-                                extractFirstColumnName(expr),
+                                cols.isEmpty() ? extractFirstColumnName(expr) : cols.get(0),
                                 ChangeType.ADD_UNIQUE,
                                 RiskLevel.MEDIUM
-                        ));
+                        ).withIndex(uniqueName(expr), cols));
                     } else if (exprStr.contains("NOT NULL") && !exprStr.contains("DEFAULT")) {
                         // DEFAULT 없는 NOT NULL 컬럼 추가: 엔티티가 모르는 컬럼이라 INSERT 에서 값이 빠져 실패한다.
                         result.add(new SchemaChange(
@@ -390,13 +458,126 @@ public class MigrationParser {
         return result;
     }
 
+    /**
+     * DROP 구문. 전에는 대상 종류를 보지 않아서 DROP INDEX idx ON users 를 "idx 테이블 삭제"로 처리했다.
+     */
     private SchemaChange handleDrop(Drop drop) {
-        return new SchemaChange(
-                ident(drop.getName().getName()),
-                null,
-                ChangeType.DROP_TABLE,
-                RiskLevel.HIGH
-        );
+        String type = drop.getType() == null ? "" : drop.getType().toUpperCase();
+        String name = ident(drop.getName().getName());
+        return switch (type) {
+            // 엔티티는 뷰에도 매핑될 수 있다. 뷰를 지우면 테이블을 지운 것과 같은 범위가 깨진다.
+            case "TABLE", "VIEW" -> new SchemaChange(name, null, ChangeType.DROP_TABLE, RiskLevel.HIGH);
+            case "INDEX" -> indexDrop(dropIndexTable(drop), name);
+            // SEQUENCE(@SequenceGenerator), TRIGGER 등: 영향을 판단하지 못하는 대상은 통과시키지 않는다.
+            default -> throw new IllegalArgumentException("Unsupported DROP target: " + type + " " + name);
+        };
+    }
+
+    /** MySQL: DROP INDEX idx ON users → users. PostgreSQL: DROP INDEX idx → null */
+    static String dropIndexTable(Drop drop) {
+        List<String> params = drop.getParameters();
+        if (params == null) return null;
+        for (int i = 0; i + 1 < params.size(); i++) {
+            if (params.get(i).equalsIgnoreCase("ON")) return ident(params.get(i + 1));
+        }
+        return null;
+    }
+
+    /** CREATE UNIQUE INDEX 는 UNIQUE 추가다 (전에는 CREATE INDEX 계열을 전부 무시했다). 일반 인덱스는 스키마 변경이 아니다. */
+    private List<SchemaChange> handleCreateIndex(CreateIndex ci) {
+        String type = ci.getIndex().getType() == null ? "" : ci.getIndex().getType().toUpperCase();
+        if (!type.contains("UNIQUE")) return List.of();
+        List<String> cols = IndexCatalog.columns(ci.getIndex());
+        return List.of(new SchemaChange(ident(ci.getTable().getName()), cols.isEmpty() ? "unknown" : cols.get(0),
+                ChangeType.ADD_UNIQUE, RiskLevel.MEDIUM).withIndex(ident(ci.getIndex().getName()), cols));
+    }
+
+    /**
+     * 이름으로 지우는 인덱스·제약을 이전 마이그레이션의 정의로 분류한다.
+     *
+     *   UNIQUE / PRIMARY KEY → DROP_UNIQUE (HIGH, 쓰기 경로): 중복 저장이 오류 없이 성공한다
+     *   일반 인덱스          → DROP_INDEX  (LOW, 영향 없음): 쿼리는 그대로 동작한다
+     *   FK 제약              → DROP_FOREIGN_KEY (LOW)
+     *   정의 모름            → DROP_INDEX + 컬럼 null (HIGH). ChangeClassifier 가 엔티티 선언으로 마저 분류하고,
+     *                         그래도 모르면 UNIQUE 로 본다.
+     *   테이블도 모름        → 예외 (분석 불완전, 종료 코드 3)
+     */
+    private SchemaChange indexDrop(String table, String name) {
+        IndexDef def;
+        if (table != null) {
+            def = catalog.find(table, name).orElse(null);
+        } else {
+            List<IndexDef> found = catalog.findByName(name);
+            if (found.size() > 1)
+                throw new IllegalArgumentException("DROP INDEX " + name + ": 같은 이름의 인덱스가 여러 테이블에 있어 대상을 알 수 없음 "
+                        + found.stream().map(IndexDef::table).toList());
+            if (found.isEmpty())
+                throw new IllegalArgumentException("DROP INDEX " + name + ": 어느 테이블의 인덱스인지 알 수 없음 "
+                        + "(ON <table> 이 없고 이전 마이그레이션에서도 정의를 찾지 못함)");
+            def = found.get(0);
+            table = def.table();
+        }
+
+        if (def == null) {
+            return new SchemaChange(table, null, ChangeType.DROP_INDEX, RiskLevel.HIGH).withIndex(name, null);
+        }
+        String cols = String.join(", ", def.columns());
+        return switch (def.kind()) {
+            case FOREIGN_KEY -> new SchemaChange(table, null, null, ChangeType.DROP_FOREIGN_KEY, RiskLevel.LOW,
+                    name, null, null);
+            case UNIQUE, PRIMARY_KEY -> dropUnique(table, name, def.columns(),
+                    (def.kind() == IndexDef.Kind.PRIMARY_KEY ? "PRIMARY KEY" : "UNIQUE") + " (" + cols + ") 삭제 (정의: " + def.origin() + ")");
+            case INDEX -> new SchemaChange(table, def.columns().isEmpty() ? null : def.columns().get(0),
+                    ChangeType.DROP_INDEX, RiskLevel.LOW).withIndex(name, def.columns())
+                    .reclassify(ChangeType.DROP_INDEX, RiskLevel.LOW,
+                            "일반 인덱스 (" + cols + ") 삭제 (정의: " + def.origin() + "): 쿼리는 깨지지 않고 조회 성능만 영향");
+        };
+    }
+
+    private static SchemaChange dropUnique(String table, String name, List<String> cols, String what) {
+        return new SchemaChange(table, cols.isEmpty() ? null : cols.get(0), ChangeType.DROP_UNIQUE, RiskLevel.HIGH)
+                .withIndex(name, cols)
+                .reclassify(ChangeType.DROP_UNIQUE, RiskLevel.HIGH,
+                        what + ": 같은 값을 저장해도 오류 없이 성공함. 이 제약으로 중복을 막던 저장 경로 확인 필요");
+    }
+
+    /**
+     * 같은 파일에서 UNIQUE 를 지우고 같은 컬럼 집합에 다시 만들면(인덱스 이름 변경 등) 중복을 막는 제약은 그대로다.
+     * 컬럼 집합이 다르면 의미가 달라지므로 그대로 둔다.
+     */
+    private static void cancelUniqueRecreate(List<SchemaChange> changes) {
+        for (SchemaChange drop : List.copyOf(changes)) {
+            if (drop.getChangeType() != ChangeType.DROP_UNIQUE || drop.getIndexColumns() == null
+                    || drop.getIndexColumns().isEmpty()) continue;
+            IndexDef dropped = new IndexDef(drop.getTableName(), null, null, drop.getIndexColumns(), IndexDef.Kind.UNIQUE, null);
+            changes.stream()
+                    .filter(c -> c.getChangeType() == ChangeType.ADD_UNIQUE
+                            && drop.getTableName().equals(c.getTableName())
+                            && dropped.sameColumnsAs(c.getIndexColumns()))
+                    .findFirst()
+                    .ifPresent(add -> {
+                        changes.remove(add);
+                        changes.set(changes.indexOf(drop), drop.reclassify(ChangeType.MODIFY_COMPATIBLE, RiskLevel.LOW,
+                                "UNIQUE (" + String.join(", ", drop.getIndexColumns()) + ") 를 같은 파일에서 "
+                                        + (add.getIndexName() != null ? add.getIndexName() + " 로 " : "") + "다시 만듦: 중복을 막는 제약은 그대로"));
+                    });
+        }
+    }
+
+    /** ADD UNIQUE 의 대상 컬럼. ADD UNIQUE [INDEX name] (a), ADD CONSTRAINT name UNIQUE (a, b), ADD COLUMN x ... UNIQUE */
+    private static List<String> uniqueColumns(AlterExpression expr) {
+        if (expr.getUkColumns() != null) return expr.getUkColumns().stream().map(MigrationParser::ident).toList();
+        List<String> fromIndex = IndexCatalog.columns(expr.getIndex());
+        if (!fromIndex.isEmpty()) return fromIndex;
+        if (expr.getColDataTypeList() != null && !expr.getColDataTypeList().isEmpty())
+            return List.of(ident(expr.getColDataTypeList().get(0).getColumnName()));
+        return List.of();
+    }
+
+    private static String uniqueName(AlterExpression expr) {
+        if (expr.getUkName() != null) return ident(expr.getUkName());
+        if (expr.getIndex() != null && expr.getIndex().getName() != null) return ident(expr.getIndex().getName());
+        return null;
     }
 
     private boolean isFkColumn(String columnName) {
@@ -429,7 +610,7 @@ public class MigrationParser {
     }
 
     /** `db`.`users` → users. 인용부호를 벗기고 스키마 접두어를 떼어 소문자로 만든다. */
-    private static String ident(String raw) {
+    static String ident(String raw) {
         String s = raw.replaceAll("[`\"\\[\\]]", "").trim();
         int dot = s.lastIndexOf('.');
         return (dot >= 0 ? s.substring(dot + 1) : s).toLowerCase();

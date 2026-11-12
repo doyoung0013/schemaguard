@@ -155,6 +155,15 @@ public class ConsoleReporter implements ReportGenerator {
                 guide("참조 Entity 존재 여부 검증", "Validate referenced Entity existence");
                 guide("기존 데이터가 FK 제약을 만족하는지 확인", "Check whether existing data satisfies FK constraints");
             }
+            case DROP_UNIQUE -> {
+                guide("이 제약이 막던 중복(이중 결제·중복 가입 등)이 오류 없이 저장되는지 확인", "Check which duplicates (double payment, duplicate signup) will now be stored silently");
+                guide("애플리케이션의 사전 중복 검사(existsBy...)와 동시성 처리 확인", "Check application-level duplicate checks (existsBy...) and concurrency handling");
+                guide("중복이 생기면 단건 조회(findBy... 가 Optional/엔티티 반환)가 실패하는지 확인", "Check single-result lookups (findBy... returning one entity) that fail once duplicates exist");
+            }
+            case DROP_INDEX -> {
+                guide("이 인덱스를 쓰던 조회의 실행 계획 확인", "Check query plans that used this index");
+                guide("비관적 락(@Lock) 조회라면 잠금 범위가 넓어지는지 확인", "If used by pessimistic-lock queries, check whether the lock scope grows");
+            }
             default -> guide("영향 경로 검토", "Review impact path");
         }
     }
@@ -220,6 +229,16 @@ public class ConsoleReporter implements ReportGenerator {
                         "Add migration to handle existing NULL data");
                 fix("생성/수정 API에서 필수값 누락 케이스 확인",
                         "Check missing required value cases in create/update APIs");
+            }
+            case DROP_UNIQUE -> {
+                fix("UNIQUE 삭제가 의도한 것인지 확인하고, 필요하면 같은 컬럼에 다시 만들기: " + target,
+                        "Confirm the UNIQUE drop is intended; recreate it on the same columns if needed: " + target);
+                fix("저장 경로에 중복 검사 추가 (DB 제약 없이 검사만 하면 동시 요청에서 뚫릴 수 있음)",
+                        "Add duplicate checks on write paths (checks without a DB constraint can race)");
+                if (repoNode != null) {
+                    fix("중복을 막던 저장 메서드 확인: " + removePrefix(repoNode.getId()),
+                            "Check the write method that relied on this constraint: " + removePrefix(repoNode.getId()));
+                }
             }
             case ADD_UNIQUE -> {
                 fix("기존 중복 데이터 정리 후 UNIQUE 적용: " + target,

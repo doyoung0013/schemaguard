@@ -211,6 +211,86 @@ class SchemaGuardCLITest {
         assertEquals(0, json.at("/affectedApis").size());
     }
 
+    // ── 인덱스·UNIQUE 삭제 ─────────────────────────────────────────────────────
+    // 고치기 전에는 아래 마이그레이션이 모두 종료 코드 0으로 통과했다.
+
+    /** V2__test.sql 과 같은 폴더의 이전 마이그레이션. MigrationHistory 가 버전 순서로 읽는다. */
+    private void history(String name, String content) throws IOException {
+        Files.writeString(tmp.resolve(name), content);
+    }
+
+    @Test
+    void droppingUniqueFromHistoryBlocksOnWritePathOnly() throws IOException {
+        history("V1__init.sql", """
+                CREATE TABLE users (
+                    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                    email VARCHAR(100) NOT NULL UNIQUE
+                );
+                """);
+        Path report = tmp.resolve("report.json");
+
+        int code = run(sql("DROP INDEX email ON users;"), "--report-path", report.toString());
+
+        assertEquals(SchemaGuardCLI.EXIT_HIGH_RISK, code);
+        JsonNode json = readJson(report);
+        // 중복 저장이 오류 없이 성공한다: 쓰기 경로가 영향. 기존 값을 읽는 GET /me 는 깨지지 않는다.
+        assertEquals(1, json.at("/affectedApis").size(), json.toPrettyString());
+        assertEquals("POST /signup", json.at("/affectedApis/0/apiId").asText());
+        assertEquals("DROP_UNIQUE", json.at("/affectedApis/0/cause/type").asText());
+        assertEquals("email", json.at("/affectedApis/0/cause/indexName").asText());
+        assertEquals("col:users.email", json.at("/affectedApis/0/impactPath/0/id").asText());
+        assertEquals("[HIGH] DROP_UNIQUE on users.email (INDEX: email)",
+                json.at("/parse/detectedChanges/0").asText());
+    }
+
+    @Test
+    void droppingPlainIndexFromHistoryDoesNotBlock() throws IOException {
+        history("V1__init.sql", """
+                CREATE TABLE users (id BIGINT PRIMARY KEY, email VARCHAR(100));
+                CREATE INDEX idx_users_email ON users (email);
+                """);
+        Path report = tmp.resolve("report.json");
+
+        int code = run(sql("ALTER TABLE users DROP INDEX idx_users_email;"), "--report-path", report.toString());
+
+        assertEquals(SchemaGuardCLI.EXIT_OK, code);
+        assertEquals(0, readJson(report).at("/affectedApis").size());
+    }
+
+    @Test
+    void droppingUnknownIndexIsConservativelyBlocked() throws IOException {
+        // 이전 마이그레이션도 엔티티도 이 인덱스를 모른다 → UNIQUE 일 수 있다.
+        Path report = tmp.resolve("report.json");
+
+        int code = run(sql("DROP INDEX uq_users_email ON users;"), "--report-path", report.toString());
+
+        assertEquals(SchemaGuardCLI.EXIT_HIGH_RISK, code);
+        assertEquals("DROP_UNIQUE", readJson(report).at("/affectedApis/0/cause/type").asText());
+    }
+
+    @Test
+    void droppingIndexOfUnknownTableIsIncompleteAnalysis() throws IOException {
+        Path report = tmp.resolve("report.json");
+
+        int code = run(sql("DROP INDEX uq_users_email;"), "--report-path", report.toString());
+
+        assertEquals(SchemaGuardCLI.EXIT_PARSE_FAILURE, code);
+        JsonNode json = readJson(report);
+        assertFalse(json.at("/summary/analysisComplete").asBoolean());
+        assertTrue(json.at("/summary/blocked").asBoolean());
+    }
+
+    @Test
+    void laterMigrationsAreNotHistory() throws IOException {
+        // V3 은 V2 이후에 적용된다. V2 시점에는 idx_users_email 이 일반 인덱스라는 근거가 없다.
+        history("V3__later.sql", "CREATE INDEX idx_users_email ON users (email);");
+        Path report = tmp.resolve("report.json");
+
+        int code = run(sql("DROP INDEX idx_users_email ON users;"), "--report-path", report.toString());
+
+        assertEquals(SchemaGuardCLI.EXIT_HIGH_RISK, code);
+    }
+
     @Test
     void consoleModeWithoutReportPathDoesNotWriteJson() throws IOException {
         Path cwdDefault = Path.of("schemaguard-report.json");

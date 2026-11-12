@@ -21,6 +21,9 @@ public class SchemaChange {
     private ColumnDef columnDef;
     // 재분류 근거 등 사람이 읽을 설명 (없으면 null)
     private String note;
+    // 인덱스·제약 변경일 때만. indexColumns 가 null 이면 정의를 찾지 못한 것이다 (어떤 컬럼인지, UNIQUE 인지 모름).
+    private String indexName;
+    private java.util.List<String> indexColumns;
 
     /**
      * SQL 컬럼 정의. 예) VARCHAR(50) NOT NULL → dataType "VARCHAR", args [50], notNull true
@@ -77,10 +80,32 @@ public class SchemaChange {
  
     public ColumnDef getColumnDef() { return columnDef; }
     public String getNote()         { return note; }
+    public String getIndexName()    { return indexName; }
+    public java.util.List<String> getIndexColumns() { return indexColumns; }
 
     public SchemaChange withColumnDef(ColumnDef def) {
         SchemaChange c = copy(changeType, riskLevel);
         c.columnDef = def;
+        return c;
+    }
+
+    /** 인덱스·제약 정보를 붙인 사본. columns 가 null 이면 정의를 모른다는 뜻이다. */
+    public SchemaChange withIndex(String name, java.util.List<String> columns) {
+        SchemaChange c = copy(changeType, riskLevel);
+        c.indexName = name;
+        c.indexColumns = columns == null ? null : java.util.List.copyOf(columns);
+        return c;
+    }
+
+    /** 인덱스 정의를 찾아 컬럼과 종류를 정한 사본. 대표 컬럼(첫 컬럼)을 columnName 으로 쓴다. */
+    public SchemaChange resolvedIndex(String table, java.util.List<String> columns,
+                                      ChangeType type, RiskLevel risk, String note) {
+        SchemaChange c = new SchemaChange(table, columns.isEmpty() ? null : columns.get(0), newName, type, risk,
+                fkName, referencedTable, referencedColumn);
+        c.columnDef = columnDef;
+        c.note = note;
+        c.indexName = indexName;
+        c.indexColumns = java.util.List.copyOf(columns);
         return c;
     }
 
@@ -96,6 +121,8 @@ public class SchemaChange {
                 fkName, referencedTable, referencedColumn);
         c.columnDef = columnDef;
         c.note = note;
+        c.indexName = indexName;
+        c.indexColumns = indexColumns;
         return c;
     }
 
@@ -112,6 +139,7 @@ public class SchemaChange {
         sb.append(String.format("[%s] %s on %s", riskLevel, changeType, tableName));
         if (columnName != null)      sb.append(".").append(columnName);
         if (fkName != null)          sb.append(" (FK: ").append(fkName).append(")");
+        if (indexName != null)       sb.append(" (INDEX: ").append(indexName).append(")");
         if (referencedTable != null) sb.append(" → ref: ").append(referencedTable)
                                        .append(".").append(referencedColumn);
         return sb.toString();

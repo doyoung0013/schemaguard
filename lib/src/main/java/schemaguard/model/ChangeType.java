@@ -19,5 +19,9 @@ public enum ChangeType {
     DROP_FOREIGN_KEY,
     DROP_FK_COLUMN,       
     MODIFY_FK_REFERENCE,  
-    ADD_FOREIGN_KEY        
+    ADD_FOREIGN_KEY,
+
+    // 인덱스·UNIQUE 제약 변경
+    DROP_UNIQUE,          // UNIQUE 제약·인덱스, PRIMARY KEY 삭제: 중복 저장이 오류 없이 성공한다
+    DROP_INDEX            // 일반(비 UNIQUE) 인덱스 삭제: 쿼리는 깨지지 않는다 (성능만 영향)
 }

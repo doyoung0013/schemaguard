@@ -15,6 +15,113 @@
 
 ---
 
+## 15. 인덱스·UNIQUE 삭제 탐지와 조용히 통과하던 DROP 구문 수정
+
+### 문제: 인덱스를 지우는 마이그레이션이 종료 코드 0으로 통과
+
+| 구문 | 기대 | 수정 전 |
+|---|---|---|
+| `ALTER TABLE users DROP INDEX uq_users_email` | UNIQUE면 차단 | **아무것도 탐지 안 됨.** 파싱 실패로도 안 잡힘 |
+| `DROP INDEX idx_users_email ON users` | 인덱스 삭제 | **`DROP_TABLE on idx_users_email`**로 분류. 그런 테이블이 없어 영향 API 0개 |
+| `ALTER TABLE users DROP KEY uq_users_email` (MySQL) | 인덱스 삭제 | JSQLParser가 읽지 못해 종료 코드 3 |
+| `ALTER TABLE users DROP CONSTRAINT fk_x` (PostgreSQL의 FK·UNIQUE 삭제) | 제약 종류에 따라 | 무시 |
+| `DROP SEQUENCE users_seq` | 판단 불가 → 차단 | `DROP_TABLE on users_seq` |
+| `CREATE UNIQUE INDEX uq ON users (email)` | UNIQUE 추가 (MEDIUM) | 무시 |
+
+원인은 두 곳입니다.
+- `MigrationParser.handleAlter`의 `DROP` 분기가 컬럼 이름이 없으면 그냥 지나갔습니다. `DROP INDEX`, `DROP CONSTRAINT`는 컬럼 이름이 없습니다.
+- `handleDrop`이 `Drop` 구문의 대상 종류(TABLE, INDEX, SEQUENCE …)를 보지 않고 전부 테이블 삭제로 만들었습니다.
+
+1번 항목의 원칙("읽지 못한 변경은 '변경 없음'이 아니라 '알 수 없음'")과 어긋나는 구멍이었습니다.
+
+### UNIQUE 삭제를 HIGH로 보는 이유
+
+UNIQUE 제약이 사라져도 쿼리는 깨지지 않습니다. 대신 **같은 값을 저장해도 오류 없이 성공**합니다. 중복 가입, 같은 글에 좋아요 두 번, 같은 거래 번호로 두 번 지급 같은 일이 런타임 오류 없이 쌓입니다. 애플리케이션이 `existsBy...`로 미리 검사하더라도, DB 제약이 없으면 동시에 들어온 두 요청은 둘 다 검사를 통과합니다. 오류가 나지 않아서 배포 후에도 알아채기 어렵기 때문에 HIGH(차단)로 둡니다. 영향 범위는 그 테이블에 저장하는 경로(`save*`)입니다(12번의 쓰기 범위).
+
+### 방법: 인덱스 이름으로 정의를 찾는다
+
+`DROP INDEX`에는 인덱스 이름만 있습니다. 어떤 컬럼인지, UNIQUE인지는 없습니다. 그래서 아래 순서로 정의를 찾습니다.
+
+| 순서 | 출처 | 예 |
+|---|---|---|
+| 1 | **이전 마이그레이션** (`IndexCatalog`, 신규) | V1의 `email VARCHAR(255) NOT NULL UNIQUE`, V12의 `CONSTRAINT uq_post_tags_post_tag UNIQUE (post_id, tag_id)`, `CREATE INDEX ...` |
+| 2 | **엔티티 선언** (`ChangeClassifier`) | `@Table(uniqueConstraints = @UniqueConstraint(name = ...))`, `@Table(indexes = @Index(name = ..., unique = true))`, `@Column(unique = true)` |
+| 3 | 그래도 모르면 | UNIQUE일 수 있으므로 **보수적으로 UNIQUE**로 봅니다 |
+
+**이전 마이그레이션 읽기** (`MigrationHistory`, 신규)
+- 검사하는 파일과 같은 폴더에서 Flyway 이름 규칙(`V<버전>__<설명>.sql`)으로 **버전이 더 낮은 파일**만 고릅니다. 버전은 숫자 단위로 비교합니다(V2 < V10, V1.2 < V1.10). community처럼 `V2.sql`로 쓴 파일도 받고, `R__` 파일은 뺍니다.
+- 구문을 차례로 적용해 그 시점의 인덱스 목록을 만듭니다. `CREATE TABLE`(컬럼 `UNIQUE`/`PRIMARY KEY`, `UNIQUE KEY`, `KEY`, `CONSTRAINT ... UNIQUE`/`FOREIGN KEY`), `CREATE [UNIQUE] INDEX`, `ALTER TABLE ADD/DROP`, `DROP INDEX`, `DROP TABLE`, 테이블·컬럼 이름 변경을 반영합니다.
+- 검사하는 파일 안의 앞선 구문도 반영합니다. 같은 파일에서 만들고 지운 인덱스도 찾습니다.
+- 이름 없이 선언한 제약은 DB가 붙이는 이름으로도 찾습니다. MySQL은 컬럼 UNIQUE의 인덱스 이름을 컬럼 이름(`email`)으로, PostgreSQL은 `users_email_key`로 만듭니다. PRIMARY KEY는 `PRIMARY`, `users_pkey`입니다.
+- 이전 마이그레이션은 이미 적용된 이력이므로, 읽지 못한 구문이 있어도 실패로 보지 않고 개수만 출력합니다. 예: `Migration history: 17 earlier file(s), 24 index/constraint definition(s), 1 statement(s) skipped (unparseable)`
+
+**분류 규칙**
+
+| 찾은 정의 | 결과 | 위험도 | 영향 범위 |
+|---|---|---|---|
+| UNIQUE 제약·인덱스, PRIMARY KEY | `DROP_UNIQUE` (신규) | HIGH | 그 테이블의 저장 경로 |
+| 일반 인덱스 | `DROP_INDEX` (신규) | LOW | 없음 (쿼리는 깨지지 않음) |
+| FK 제약 (`DROP CONSTRAINT fk_x`) | `DROP_FOREIGN_KEY` | LOW | 없음 (12번과 같음) |
+| 정의를 못 찾음, 테이블은 앎 | `DROP_UNIQUE` (보수적) | HIGH | 그 테이블의 저장 경로 |
+| 테이블도 모름 (`DROP INDEX name`, PostgreSQL) | 파싱 실패 | - | 종료 코드 3 (분석 불완전) |
+| 같은 파일에서 **같은 컬럼 집합**에 UNIQUE를 다시 만듦 | `MODIFY_COMPATIBLE` | LOW | 없음 (인덱스 이름 변경 패턴) |
+
+- 컬럼 집합이 다르면 상쇄하지 않습니다. 예를 들어 `(email)`을 지우고 `(email, team_id)`를 만들면, 팀이 다를 때 같은 email을 허용하므로 `DROP_UNIQUE`가 남습니다.
+- 분류 근거를 `note`에 남깁니다. 엔티티가 여전히 unique로 선언하고 있으면 그것도 적습니다. 예: `UNIQUE (post_id, tag_id) 삭제 (정의: V12__create_tag_report_notification_bookmark.sql): 같은 값을 저장해도 오류 없이 성공함. … 엔티티 PostTag (@Table uniqueConstraints) 는 아직 unique 로 선언되어 있어 코드와 DB 가 어긋남`
+- JSON `cause`에 `indexName`, `indexColumns`를 추가했습니다. 인덱스 변경일 때만 넣어서 다른 변경의 리포트 모양은 그대로입니다.
+
+**함께 고친 것**
+- `DROP` 구문: `TABLE`과 `VIEW`는 테이블 삭제(엔티티가 뷰에 매핑될 수 있음), `INDEX`는 위 규칙, 그 밖의 대상(`SEQUENCE` 등)은 파싱 실패(종료 코드 3)입니다.
+- `ALTER TABLE ... DROP` 중 컬럼·인덱스·제약 어느 것도 아닌 형태는 무시하지 않고 파싱 실패로 처리합니다.
+- `ALTER TABLE ... DROP KEY`를 정규식으로 처리합니다. `DROP UNIQUE (cols)`, `DROP PRIMARY KEY`도 `DROP_UNIQUE`로 탐지합니다.
+- `CREATE UNIQUE INDEX`를 `ADD_UNIQUE`로 탐지합니다.
+- `ADD UNIQUE INDEX uq (email)`의 대상 컬럼을 `unknown` 대신 `email`로 기록합니다.
+
+### 결과
+
+**community 마이그레이션 18개 회귀 비교** (이전 빌드 `362683a` vs 새 빌드)
+- 종료 코드 18개 모두 같습니다.
+- JSON 리포트 17개는 바이트 단위로 같습니다. V16 하나만 `ADD_UNIQUE`의 `cause`에 `indexName`, `indexColumns`가 붙었고, 이 두 필드를 빼면 같습니다.
+
+**새 시나리오** (community `test-schemaguard-complex` 코드에 V18로 추가해 실행)
+
+| V18 | 수정 전 | 수정 후 |
+|---|---|---|
+| `ALTER TABLE post_tags DROP INDEX uq_post_tags_post_tag` | 탐지 없음, 종료 코드 0 | **HIGH `DROP_UNIQUE`, 종료 코드 1.** `POST /api/tags/posts/{postId}` (`TagService.attachTags → PostTagRepository.save`). 정의는 V12, 엔티티도 아직 unique라고 표시 |
+| `DROP INDEX email ON users` | `DROP_TABLE on email`, 영향 0, 종료 코드 0 | **HIGH, `POST /signup`** (`UserService.signUp → UserRepository.save`), 종료 코드 1 |
+| `ALTER TABLE post_likes DROP INDEX uk_post_like_post_user` | 탐지 없음, 종료 코드 0 | **HIGH, `POST /posts/{postId}/like`**, 종료 코드 1. 마이그레이션에는 없고 엔티티 `@UniqueConstraint`로 찾음 |
+| `ALTER TABLE reports DROP INDEX uq_reports_reporter_post` | 탐지 없음, 종료 코드 0 | **HIGH, `POST /api/reports`**, 종료 코드 1. 정의는 V16 |
+| `DROP INDEX idx_notifications_receiver_read ON notifications` | `DROP_TABLE on idx_…`, 종료 코드 0 | LOW `DROP_INDEX`, 영향 없음, 종료 코드 0 |
+| `uq_post_tags_post_tag` 삭제 + 같은 컬럼에 `uq_post_tag_pair` 추가 | MEDIUM `ADD_UNIQUE`, 종료 코드 0 | LOW `MODIFY_COMPATIBLE`, 영향 없음 |
+
+`DROP INDEX email ON users`는 이전 마이그레이션이 아니라 엔티티 `User.email`의 `@Column(unique = true)`로 찾았습니다. community의 V0과 V11이 `users.email`을 지우는 시나리오라서, V0~V17을 차례로 적용하면 V18 시점에는 email 컬럼과 그 인덱스가 이미 없기 때문입니다. community의 마이그레이션은 서로 독립된 측정 시나리오이고, 실제 Flyway 프로젝트처럼 차례로 쌓이는 이력이 아닙니다. 실제 프로젝트에서는 이전 마이그레이션 쪽에서 찾게 됩니다.
+
+### 테스트
+
+- 신규 `IndexChangeParserTest` 24개
+  - 수정 전 버그 재현: `DROP INDEX`가 무시되지 않음, `DROP INDEX … ON`이 테이블 삭제가 아님, `DROP KEY`, 테이블을 모르는 `DROP INDEX`는 실패, `DROP SEQUENCE`는 실패, `DROP VIEW`/`DROP TABLE IF EXISTS`
+  - `CREATE UNIQUE INDEX`, 일반 `CREATE INDEX`(변경 아님), `ADD UNIQUE INDEX`의 컬럼
+  - 이전 마이그레이션: 이름 있는 UNIQUE, MySQL·PostgreSQL 암묵 이름, `CREATE UNIQUE INDEX`, 일반 인덱스, 테이블 없는 `DROP INDEX`, `DROP CONSTRAINT`가 FK인 경우, `DROP PRIMARY KEY`, `DROP UNIQUE (cols)`
+  - 같은 컬럼 재생성은 상쇄, 컬럼이 늘면 상쇄하지 않음, 같은 파일 안의 인덱스, 이력의 삭제·테이블 이름 변경 반영, 읽지 못한 이력 구문은 세기만 함
+- 신규 `IndexChangeClassifierTest` 7개: 엔티티 `@UniqueConstraint`/`@Index(unique)`/일반 `@Index`/`@Column(unique)` 선언 읽기와 분류, 모르는 인덱스는 보수적으로 UNIQUE, 엔티티가 아직 unique로 선언하면 근거에 표시
+- 신규 `MigrationHistoryTest` 3개: Flyway 버전 순서(V2 < V10, V1.2 < V1.10, `V2.sql`), `R__` 제외, 버전 없는 파일은 이력 없음
+- `SchemaGuardCLITest` 5개 추가: 이력의 UNIQUE 삭제는 쓰기 경로만 차단(`GET /me`는 영향 없음), 일반 인덱스는 통과, 모르는 인덱스는 차단, 테이블을 모르면 종료 코드 3, **뒤 버전 파일은 이력이 아님**
+- 결정성 스냅샷은 그대로입니다.
+- 전체 107개 통과
+
+### 한계
+
+- **이력은 같은 폴더의 Flyway 버전 파일만 봅니다.** 하위 폴더, Liquibase, `flyway.locations` 여러 곳은 보지 않습니다. 이력은 차례로 쌓인다고 가정합니다(위 community 사례).
+- **이전 마이그레이션에서 읽지 못한 구문의 인덱스는 모릅니다.** community V1은 `posts` 정의 뒤 `;`가 빠져 `posts`, `comments`의 정의를 읽지 못합니다. 그 인덱스를 지우면 엔티티로 찾거나 보수적으로 HIGH가 됩니다.
+- **정의를 모르는 일반 인덱스 삭제도 차단될 수 있습니다.** UNIQUE일 가능성을 배제할 수 없어서입니다. 리포트의 `note`에 "일반 인덱스라면 이 경고는 무시해도 됨"이라고 적습니다.
+- **CHECK 제약은 기록하지 않습니다.** `DROP CONSTRAINT chk_…`는 정의를 모르는 제약이라 보수적으로 HIGH가 됩니다. MySQL의 `DROP CHECK`는 JSQLParser가 읽지 못해 종료 코드 3입니다.
+- **읽기 쪽 영향은 아직 보지 않습니다.** 중복이 쌓인 뒤에는 단건을 돌려주는 조회(`Optional<User> findByEmail`)가 `IncorrectResultSizeDataAccessException`으로 실패합니다. 지금은 콘솔 가이드에만 적고 영향 경로로는 잡지 않습니다.
+- **쓰기 범위는 테이블 단위입니다.** 그 컬럼을 실제로 쓰는 저장 경로만 고르지는 않습니다(12번과 같음).
+- **일반 인덱스 삭제의 성능 영향은 보지 않습니다.** 특히 비관적 락(`@Lock(PESSIMISTIC_WRITE)`) 조회가 쓰던 인덱스가 사라지면 잠금 범위가 넓어집니다. 다음 과제입니다.
+- `ALTER TABLE ... RENAME INDEX`는 JSQLParser 4.7이 읽지 못해 종료 코드 3입니다(통과시키지 않음).
+
+---
+
 ## 14. 연관 접근을 이름 추정에서 루트 타입 해석으로
 
 11번과 13번의 연관 초기화 추적은 `x.getPost()`의 **속성 이름 `post`만 보고** 어느 엔티티인지 추정했습니다. 이 방식에는 세 가지 구멍이 있습니다.

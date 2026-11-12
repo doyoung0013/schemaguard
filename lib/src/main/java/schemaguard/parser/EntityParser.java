@@ -5,12 +5,15 @@ import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
 import com.github.javaparser.ast.body.FieldDeclaration;
 import com.github.javaparser.ast.expr.AnnotationExpr;
+import com.github.javaparser.ast.expr.ArrayInitializerExpr;
+import com.github.javaparser.ast.expr.Expression;
 import com.github.javaparser.ast.expr.MemberValuePair;
 import com.github.javaparser.ast.expr.NormalAnnotationExpr;
 import com.github.javaparser.ast.expr.SingleMemberAnnotationExpr;
 import com.github.javaparser.ast.nodeTypes.NodeWithAnnotations;
 import schemaguard.model.EntityMapping;
 import schemaguard.model.FkMapping;
+import schemaguard.model.IndexDef;
 
 import java.io.File;
 import java.util.*;
@@ -43,6 +46,7 @@ public class EntityParser {
     private ParseResult extract(CompilationUnit cu, String filePath) {
         List<EntityMapping> entityMappings = new ArrayList<>();
         List<FkMapping>     fkMappings     = new ArrayList<>();
+        List<IndexDef>      indexes        = new ArrayList<>();
 
         cu.findAll(ClassOrInterfaceDeclaration.class).forEach(clazz -> {
             if (!hasAnnotation(clazz, "Entity")) return;
@@ -50,6 +54,7 @@ public class EntityParser {
             String className = clazz.getNameAsString();
             String tableName = getAnnotationValue(clazz, "Table", "name")
                     .orElse(toSnakeCase(className));
+            indexes.addAll(tableIndexes(clazz, className, tableName));
 
             for (FieldDeclaration field : clazz.getFields()) {
                 if (hasAnnotation(field, "Transient")) continue;
@@ -88,12 +93,55 @@ public class EntityParser {
                             filePath, line,                 // ← 위치 정보
                             effectiveJavaType(field),
                             getAnnotationValue(field, "Column", "length").map(EntityParser::parseIntOrNull).orElse(null),
-                            isNullable(field)));
+                            isNullable(field),
+                            getAnnotationValue(field, "Column", "unique").map(v -> v.trim().equals("true")).orElse(false)));
                 }
             }
         });
 
-        return new ParseResult(entityMappings, fkMappings);
+        return new ParseResult(entityMappings, fkMappings, indexes);
+    }
+
+    /**
+     * @Table(uniqueConstraints = @UniqueConstraint(name, columnNames), indexes = @Index(name, columnList, unique)).
+     * DROP INDEX 의 이름을 이전 마이그레이션에서 찾지 못했을 때 이 선언으로 UNIQUE 인지 판단한다.
+     */
+    private List<IndexDef> tableIndexes(ClassOrInterfaceDeclaration clazz, String className, String tableName) {
+        List<IndexDef> out = new ArrayList<>();
+        Optional<AnnotationExpr> table = clazz.getAnnotationByName("Table");
+        if (table.isEmpty() || !(table.get() instanceof NormalAnnotationExpr normal)) return out;
+        for (MemberValuePair p : normal.getPairs()) {
+            String attr = p.getNameAsString();
+            if (!attr.equals("uniqueConstraints") && !attr.equals("indexes")) continue;
+            for (Expression e : elements(p.getValue())) {
+                if (!(e instanceof NormalAnnotationExpr ann)) continue;
+                String name = null;
+                List<String> cols = List.of();
+                boolean unique = attr.equals("uniqueConstraints");
+                for (MemberValuePair q : ann.getPairs()) {
+                    switch (q.getNameAsString()) {
+                        case "name" -> name = stripQuotes(q.getValue().toString());
+                        case "columnNames" -> cols = elements(q.getValue()).stream()
+                                .map(x -> stripQuotes(x.toString())).toList();
+                        // @Index(columnList = "a, b DESC")
+                        case "columnList" -> cols = Arrays.stream(stripQuotes(q.getValue().toString()).split(","))
+                                .map(c -> c.trim().split("\\s+")[0]).filter(c -> !c.isEmpty()).toList();
+                        case "unique" -> unique = unique || q.getValue().toString().trim().equals("true");
+                        default -> { }
+                    }
+                }
+                if (cols.isEmpty()) continue;
+                out.add(new IndexDef(tableName, name, List.of(), cols,
+                        unique ? IndexDef.Kind.UNIQUE : IndexDef.Kind.INDEX,
+                        className + " (@Table " + attr + ")"));
+            }
+        }
+        return out;
+    }
+
+    /** 배열 초기화식 {a, b} 이면 원소들, 단일 값이면 그 값 하나 */
+    private static List<Expression> elements(Expression value) {
+        return value instanceof ArrayInitializerExpr arr ? arr.getValues() : List.of(value);
     }
 
     // ── 어노테이션 헬퍼 ──────────────────────────────────────────────────────
@@ -172,6 +220,11 @@ public class EntityParser {
 
     public record ParseResult(
             List<EntityMapping> entityMappings,
-            List<FkMapping>     fkMappings
-    ) {}
+            List<FkMapping>     fkMappings,
+            List<IndexDef>      indexes          // @Table 의 uniqueConstraints / indexes
+    ) {
+        public ParseResult(List<EntityMapping> entityMappings, List<FkMapping> fkMappings) {
+            this(entityMappings, fkMappings, List.of());
+        }
+    }
 }
