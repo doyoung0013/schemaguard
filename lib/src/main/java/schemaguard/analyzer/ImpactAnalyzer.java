@@ -51,7 +51,8 @@ public class ImpactAnalyzer {
             if (change.getChangeType() == ChangeType.ADD_COLUMN) continue;
 
             // 쓰기 경로는 save 메서드에서 시작한다. 왜 그 메서드인지 보이도록 경로 맨 앞에 대상 컬럼을 붙인다.
-            Node writeTarget = isWriteScope(change)
+            // 잠금 범위 경고도 같은 방식으로, 잠금 메서드 앞에 지운 인덱스의 첫 컬럼을 붙인다.
+            Node writeTarget = isWriteScope(change) || change.getChangeType() == ChangeType.LOCK_SCOPE_WIDENED
                     ? nodeIndex.get("col:" + change.getTableName() + "." + change.getColumnName()) : null;
 
             for (Node start : sortedDistinct(resolveStartNodes(change))) {
@@ -97,6 +98,12 @@ public class ImpactAnalyzer {
             case DROP_INDEX -> change.getIndexColumns() == null
                     ? writeMethodsByTable.getOrDefault(change.getTableName(), List.of())
                     : List.of();
+
+            // 비관적 락 조회가 쓰던 인덱스 삭제: 그 잠금 메서드를 거치는 API 만 (같은 테이블의 다른 조회는 잠금과 무관)
+            case LOCK_SCOPE_WIDENED -> {
+                Node lock = change.getLockMethod() == null ? null : nodeIndex.get(change.getLockMethod());
+                yield lock != null ? List.of(lock) : List.of();
+            }
 
             // 영향 없음: FK 제약 삭제(무결성만 약해짐), 엔티티와 호환되는 타입 변경, 컬럼 추가
             case DROP_FOREIGN_KEY, MODIFY_COMPATIBLE, ADD_COLUMN -> List.of();

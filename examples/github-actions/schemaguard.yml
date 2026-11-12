@@ -2,7 +2,8 @@
 #
 # 동작
 #   1. PR에서 추가/수정된 마이그레이션 SQL만 고른다 (삭제된 파일 제외)
-#   2. SQL 파일마다 SchemaGuard를 실행한다. 한 파일이 실패해도 나머지를 계속 분석한다
+#   2. 바뀐 SQL 파일 전체를 SchemaGuard 한 번으로 분석한다. Java 소스는 한 번만 파싱하고,
+#      한 파일이 실패해도 나머지를 계속 분석한다. 파일별 종료 코드는 results.tsv 에 남는다
 #   3. JSON 리포트의 summary.blocked(HIGH 위험 또는 SQL 파싱 실패)와 종료 코드로 병합 차단 여부를 판단한다
 #   4. 결과를 Step Summary에 쓰고 리포트를 Artifact로 올린다
 #
@@ -79,29 +80,28 @@ jobs:
           ./gradlew --no-daemon -q installDist
 
       # 판정은 다음 단계에서 한다. 여기서는 모든 파일을 끝까지 분석하고 결과만 기록한다.
+      # 파일 목록은 배열로 넘긴다(파일명을 셸 스크립트에 끼워 넣지 않는다).
+      # SchemaGuard 가 <REPORT_DIR>/<파일명>.json 과 results.tsv(파일, 종료 코드, 리포트 경로)를 쓴다.
+      # --history: MIGRATION_DIR 에서 검사 파일보다 파일 이름의 V 번호가 작은 파일을 읽어 DROP INDEX 의 대상을 찾는다.
+      #   파일 이름이 V<번호>__<설명>.sql 규칙이 아니면 이 줄을 지운다(그러면 정의를 모르는 인덱스 삭제는 보수적으로 차단).
       - name: Run SchemaGuard
         if: steps.changed-sql.outputs.sql_changed == 'true'
         run: |
           set +e
           mkdir -p "$REPORT_DIR"
-          : > "$REPORT_DIR/results.tsv"
           BIN="$SCHEMAGUARD_DIR/lib/build/install/lib/bin/lib"
 
+          FILES=()
           while IFS= read -r SQL_FILE; do
-            [ -z "$SQL_FILE" ] && continue
-            REPORT="$REPORT_DIR/$(basename "$SQL_FILE" .sql).json"
-
-            echo "::group::SchemaGuard: $SQL_FILE"
-            "$BIN" \
-              --source "$GITHUB_WORKSPACE/$SOURCE_DIR" \
-              --migration "$GITHUB_WORKSPACE/$SQL_FILE" \
-              --report-path "$REPORT"
-            CODE=$?
-            echo "::endgroup::"
-            echo "→ exit code $CODE"
-
-            printf '%s\t%s\t%s\n' "$SQL_FILE" "$CODE" "$REPORT" >> "$REPORT_DIR/results.tsv"
+            [ -n "$SQL_FILE" ] && FILES+=("$GITHUB_WORKSPACE/$SQL_FILE")
           done < "$RUNNER_TEMP/changed-sql.txt"
+
+          "$BIN" \
+            --source "$GITHUB_WORKSPACE/$SOURCE_DIR" \
+            --migration "${FILES[@]}" \
+            --history "$GITHUB_WORKSPACE/$MIGRATION_DIR" \
+            --report-dir "$REPORT_DIR"
+          echo "→ overall exit code $?"
           exit 0
 
       - name: Check results and write summary
@@ -116,16 +116,25 @@ jobs:
           def cell(s):
               return str(s).replace("|", "\\|").replace("\n", " ")
 
+          workspace = os.environ["GITHUB_WORKSPACE"].rstrip("/") + "/"
           rows = []
-          with open(os.path.join(report_dir, "results.tsv"), encoding="utf-8") as f:
-              for line in f:
-                  line = line.rstrip("\n")
-                  if line:
-                      sql, code, path = line.split("\t")
-                      rows.append((sql, int(code), path))
+          results = os.path.join(report_dir, "results.tsv")
+          if os.path.exists(results):
+              with open(results, encoding="utf-8") as f:
+                  for line in f:
+                      line = line.rstrip("\n")
+                      if line:
+                          sql, code, path = line.split("\t")
+                          sql = sql[len(workspace):] if sql.startswith(workspace) else sql
+                          rows.append((sql, int(code), path))
 
           out = ["## 🛡️ SchemaGuard Report", ""]
           blocked_any = False
+
+          # results.tsv 가 없으면 SchemaGuard 가 분석을 시작하지 못한 것이다(인자 오류 등).
+          if not rows:
+              blocked_any = True
+              out += ["❌ **SchemaGuard 실행 오류**: 결과 파일이 없습니다. Run SchemaGuard 단계 로그를 확인하세요.", ""]
 
           for sql, code, path in rows:
               out += [f"### `{sql}`", ""]

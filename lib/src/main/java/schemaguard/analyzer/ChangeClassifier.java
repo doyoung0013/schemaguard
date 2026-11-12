@@ -26,6 +26,14 @@ import java.util.*;
  */
 public class ChangeClassifier {
 
+    /** 이전 마이그레이션을 읽지 않았으면(--history 없음) "정의를 찾지 못함" 근거에 그 사실을 덧붙인다. */
+    private boolean historyNotRead;
+
+    public ChangeClassifier historyNotRead(boolean v) {
+        this.historyNotRead = v;
+        return this;
+    }
+
     private static final int JPA_DEFAULT_LENGTH = 255;
 
     private static final Set<String> STRING_TYPES = Set.of(
@@ -171,8 +179,9 @@ public class ChangeClassifier {
         }
 
         return c.reclassify(ChangeType.DROP_UNIQUE, RiskLevel.HIGH,
-                "인덱스 " + name + " 의 정의를 이전 마이그레이션과 엔티티에서 찾지 못함: UNIQUE 인지 알 수 없어 보수적으로 UNIQUE 로 간주. "
-                        + "일반 인덱스라면 이 경고는 무시해도 됨");
+                "인덱스 " + name + " 의 정의를 이전 마이그레이션과 엔티티에서 찾지 못함"
+                        + (historyNotRead ? " (이전 마이그레이션은 --history 를 줄 때만 읽음)" : "")
+                        + ": UNIQUE 인지 알 수 없어 보수적으로 UNIQUE 로 간주. 일반 인덱스라면 이 경고는 무시해도 됨");
     }
 
     /** 엔티티가 여전히 같은 컬럼을 unique 로 선언하면 코드와 DB 가 어긋난다는 것을 근거에 덧붙인다. */

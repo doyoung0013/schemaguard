@@ -9,7 +9,9 @@ mkdir -p "$OUT"
 : > "$OUT/codes.txt"
 for f in "$COMMUNITY"/src/main/resources/db/migration/*.sql; do
   n=$(basename "$f" .sql)
-  "$BIN" --source "$COMMUNITY/src/main/java" --migration "$f" --output json --report-path "$OUT/$n.json" >/dev/null 2>&1
+  # --history: 이전 마이그레이션에서 DROP INDEX 의 정의를 찾는다(9·15번 측정과 같은 조건)
+  "$BIN" --source "$COMMUNITY/src/main/java" --migration "$f" --history "$COMMUNITY/src/main/resources/db/migration" \
+    --output json --report-path "$OUT/$n.json" >/dev/null 2>&1
   echo "$n $?" >> "$OUT/codes.txt"
 done
 cat "$OUT/codes.txt"

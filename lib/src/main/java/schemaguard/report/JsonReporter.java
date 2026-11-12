@@ -135,6 +135,11 @@ public class JsonReporter implements ReportGenerator {
         m.put("referencedColumn", c.getReferencedColumn());
         m.put("newDefinition",    c.getColumnDef() != null ? c.getColumnDef().toString() : null);
         m.put("note",             c.getNote());
+        // 잠금 범위 경고일 때만
+        if (c.getLockMethod() != null) {
+            m.put("lockMethod", c.getLockMethod().substring(c.getLockMethod().indexOf(':') + 1));
+            m.put("lockMode",   c.getLockMode());
+        }
         // 인덱스·제약 변경일 때만 넣는다 (다른 변경의 리포트 모양은 그대로 둔다)
         if (c.getIndexName() != null || c.getIndexColumns() != null) {
             m.put("indexName",    c.getIndexName());

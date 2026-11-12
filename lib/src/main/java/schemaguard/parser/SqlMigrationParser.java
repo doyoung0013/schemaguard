@@ -96,6 +96,22 @@ public class SqlMigrationParser {
         this.history = history;
     }
 
+    /**
+     * 마지막 parse 의 이 파일 구문까지 적용한 인덱스 목록 (= 마이그레이션 적용 후 스키마의 인덱스).
+     * 인덱스 삭제 뒤 남는 대체 인덱스를 찾는 데 쓴다. parse 전에는 이력 그대로다.
+     */
+    public IndexCatalog catalogAfterParse() {
+        return (catalog != null ? catalog : history).copy();
+    }
+
+    /** 이전 마이그레이션을 읽지 않았으면(--history 없음) "정의를 찾지 못함" 실패 사유에 그 사실을 덧붙인다. */
+    private boolean historyNotRead;
+
+    public SqlMigrationParser historyNotRead(boolean v) {
+        this.historyNotRead = v;
+        return this;
+    }
+
     public ParseResult parse(File sqlFile) throws Exception {
         return parseSQL(Files.readString(sqlFile.toPath()));
     }
@@ -513,7 +529,8 @@ public class SqlMigrationParser {
                         + found.stream().map(IndexDef::table).toList());
             if (found.isEmpty())
                 throw new IllegalArgumentException("DROP INDEX " + name + ": 어느 테이블의 인덱스인지 알 수 없음 "
-                        + "(ON <table> 이 없고 이전 마이그레이션에서도 정의를 찾지 못함)");
+                        + "(ON <table> 이 없고 이전 마이그레이션에서도 정의를 찾지 못함)"
+                        + (historyNotRead ? " (이전 마이그레이션은 --history 를 줄 때만 읽음)" : ""));
             def = found.get(0);
             table = def.table();
         }

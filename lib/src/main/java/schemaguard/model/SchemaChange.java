@@ -25,6 +25,10 @@ public class SchemaChange {
     private String indexName;
     private java.util.List<String> indexColumns;
 
+    // LOCK_SCOPE_WIDENED 일 때만. 영향 경로의 시작점이 되는 리포지토리 메서드 노드 id 와 잠금 모드
+    private String lockMethod;     // "repo:<Repository>.<method>"
+    private String lockMode;       // PESSIMISTIC_WRITE 등
+
     /**
      * SQL 컬럼 정의. 예) VARCHAR(50) NOT NULL → dataType "VARCHAR", args [50], notNull true
      */
@@ -82,6 +86,24 @@ public class SchemaChange {
     public String getNote()         { return note; }
     public String getIndexName()    { return indexName; }
     public java.util.List<String> getIndexColumns() { return indexColumns; }
+    public String getLockMethod()   { return lockMethod; }
+    public String getLockMode()     { return lockMode; }
+
+    /** 잠금 범위 확대 경고. 이 인덱스 삭제(this)를 원인으로, 잠금 메서드에서 영향 경로를 시작한다. */
+    public SchemaChange lockScopeWidened(String lockMethodNodeId, String mode, String note) {
+        SchemaChange c = copy(ChangeType.LOCK_SCOPE_WIDENED, RiskLevel.MEDIUM);
+        c.note = note;
+        c.lockMethod = lockMethodNodeId;
+        c.lockMode = mode;
+        return c;
+    }
+
+    /** 근거(note)만 덧붙인 사본 */
+    public SchemaChange withNoteAppended(String extra) {
+        SchemaChange c = copy(changeType, riskLevel);
+        c.note = note == null ? extra : note + ". " + extra;
+        return c;
+    }
 
     public SchemaChange withColumnDef(ColumnDef def) {
         SchemaChange c = copy(changeType, riskLevel);
@@ -123,6 +145,8 @@ public class SchemaChange {
         c.note = note;
         c.indexName = indexName;
         c.indexColumns = indexColumns;
+        c.lockMethod = lockMethod;
+        c.lockMode = lockMode;
         return c;
     }
 
@@ -140,6 +164,7 @@ public class SchemaChange {
         if (columnName != null)      sb.append(".").append(columnName);
         if (fkName != null)          sb.append(" (FK: ").append(fkName).append(")");
         if (indexName != null)       sb.append(" (INDEX: ").append(indexName).append(")");
+        if (lockMethod != null)      sb.append(" (LOCK: ").append(lockMethod.substring(lockMethod.indexOf(':') + 1)).append(")");
         if (referencedTable != null) sb.append(" → ref: ").append(referencedTable)
                                        .append(".").append(referencedColumn);
         return sb.toString();

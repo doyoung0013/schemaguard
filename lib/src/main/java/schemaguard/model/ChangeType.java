@@ -23,5 +23,8 @@ public enum ChangeType {
 
     // 인덱스·UNIQUE 제약 변경
     DROP_UNIQUE,          // UNIQUE 제약·인덱스, PRIMARY KEY 삭제: 중복 저장이 오류 없이 성공한다
-    DROP_INDEX            // 일반(비 UNIQUE) 인덱스 삭제: 쿼리는 깨지지 않는다 (성능만 영향)
+    DROP_INDEX,           // 일반(비 UNIQUE) 인덱스 삭제: 쿼리는 깨지지 않는다 (성능만 영향)
+
+    // 인덱스 삭제의 동시성 영향 (DROP_INDEX / DROP_UNIQUE 에 덧붙는 경고)
+    LOCK_SCOPE_WIDENED    // 비관적 락 조회가 쓰던 인덱스가 사라지고 대체 인덱스가 없음: 잠금 범위 확대 가능 (MEDIUM)
 }

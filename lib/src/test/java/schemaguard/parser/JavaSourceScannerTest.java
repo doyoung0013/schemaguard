@@ -60,6 +60,45 @@ class JavaSourceScannerTest {
         assertEquals(2, r.controllers().size());
     }
 
+    /** 예전에는 Java 11 문법으로 읽어서 record·텍스트 블록이 있는 파일을 통째로 파싱 실패로 뺐다 (CHANGELOG 18). */
+    @Test
+    void java17SyntaxIsParsed() throws Exception {
+        Path dir = tmp.resolve("src/main/java/com/example");
+        Files.createDirectories(dir);
+        Files.writeString(dir.resolve("UserResponse.java"), """
+                package com.example;
+                public record UserResponse(Long id, String email) {
+                    public static UserResponse from(User u) { return new UserResponse(u.getId(), u.getEmail()); }
+                }
+                """);
+        Files.writeString(dir.resolve("UserRepository.java"), """
+                package com.example;
+                public interface UserRepository extends JpaRepository<User, Long> {
+                    @Query(\"""
+                            select u from User u
+                            where u.email = :email
+                            \""")
+                    User byEmail(String email);
+                }
+                """);
+        Files.writeString(dir.resolve("Shape.java"), """
+                package com.example;
+                public sealed interface Shape permits Circle {}
+                """);
+        Files.writeString(dir.resolve("Circle.java"), """
+                package com.example;
+                public final class Circle implements Shape {
+                    boolean same(Object o) { return o instanceof Circle c && c.hashCode() == hashCode(); }
+                }
+                """);
+
+        List<File> files = JavaSourceScanner.collectJavaFiles(tmp.resolve("src/main/java").toFile());
+        JavaSourceScanner.Result r = new JavaSourceScanner().scan(files);
+        assertEquals(List.of(), r.failedFiles());
+        assertEquals("select u from User u where u.email = :email",
+                r.repositories().get(0).getMethods().get(0).query());
+    }
+
     @Test
     void missingDirectoryYieldsNoFiles() {
         assertTrue(JavaSourceScanner.collectJavaFiles(tmp.resolve("nope").toFile()).isEmpty());

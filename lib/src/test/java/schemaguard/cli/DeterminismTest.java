@@ -189,6 +189,26 @@ class DeterminismTest {
                 "report changed; if intended, regenerate with -PupdateSnapshots=true and review the diff");
     }
 
+    /** 병렬 파싱(스레드 수와 무관)도 같은 정답 파일과 바이트 단위로 같아야 한다. */
+    @Test
+    void reportMatchesSnapshotForAnyThreadCount() throws IOException {
+        assumeSnapshot();
+        String expected = Files.readString(SNAPSHOT, StandardCharsets.UTF_8).replace("\r\n", "\n");
+        for (String threads : new String[]{"1", "2", "4", "8"}) {
+            Path report = tmp.resolve("threads-" + threads + ".json");
+            int code = new CommandLine(new SchemaGuardCLI()).execute(
+                    "--source", src.toString(), "--migration", migration.toString(),
+                    "--output", "json", "--report-path", report.toString(), "--threads", threads);
+            assertEquals(SchemaGuardCLI.EXIT_HIGH_RISK, code);
+            assertEquals(expected, Files.readString(report, StandardCharsets.UTF_8), "threads=" + threads);
+        }
+    }
+
+    private static void assumeSnapshot() {
+        org.junit.jupiter.api.Assumptions.assumeFalse(Boolean.getBoolean("schemaguard.updateSnapshots"));
+        assertTrue(Files.exists(SNAPSHOT), "snapshot missing");
+    }
+
     @Test
     void repeatedRunsProduceIdenticalReports() throws IOException {
         String first = null;

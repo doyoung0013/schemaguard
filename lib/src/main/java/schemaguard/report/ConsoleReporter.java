@@ -160,6 +160,14 @@ public class ConsoleReporter implements ReportGenerator {
                 guide("애플리케이션의 사전 중복 검사(existsBy...)와 동시성 처리 확인", "Check application-level duplicate checks (existsBy...) and concurrency handling");
                 guide("중복이 생기면 단건 조회(findBy... 가 Optional/엔티티 반환)가 실패하는지 확인", "Check single-result lookups (findBy... returning one entity) that fail once duplicates exist");
             }
+            case LOCK_SCOPE_WIDENED -> {
+                guide("잠금 조회의 실행 계획 확인 (EXPLAIN 의 type/key/rows): 인덱스 없이 훑으면 훑은 행이 모두 잠김",
+                        "Check the plan of the locking query (EXPLAIN type/key/rows): rows scanned without an index are all locked");
+                guide("서로 다른 행을 다루는 동시 요청(재고 차감, 쿠폰 발급 등)이 잠금 대기·타임아웃으로 실패하는지 확인",
+                        "Check whether concurrent requests on different rows (stock, coupons) now wait or time out");
+                guide("MySQL InnoDB 기준. READ COMMITTED 는 남는 잠금이 적지만, 훑는 동안 다른 요청이 잡은 행에서 똑같이 기다린다",
+                        "Applies to MySQL InnoDB. READ COMMITTED holds fewer locks but scans still wait on rows locked by others");
+            }
             case DROP_INDEX -> {
                 guide("이 인덱스를 쓰던 조회의 실행 계획 확인", "Check query plans that used this index");
                 guide("비관적 락(@Lock) 조회라면 잠금 범위가 넓어지는지 확인", "If used by pessimistic-lock queries, check whether the lock scope grows");
@@ -239,6 +247,16 @@ public class ConsoleReporter implements ReportGenerator {
                     fix("중복을 막던 저장 메서드 확인: " + removePrefix(repoNode.getId()),
                             "Check the write method that relied on this constraint: " + removePrefix(repoNode.getId()));
                 }
+            }
+            case LOCK_SCOPE_WIDENED -> {
+                fix("잠금 조건 컬럼으로 시작하는 인덱스를 남기거나 대체 인덱스를 먼저 만든 뒤 삭제: " + target,
+                        "Keep or first create an index that starts with the lock condition columns, then drop: " + target);
+                if (repoNode != null) {
+                    fix("잠금 조회 확인: " + removePrefix(repoNode.getId()),
+                            "Check the locking query: " + removePrefix(repoNode.getId()));
+                }
+                fix("잠금 대기 시간 제한(jakarta.persistence.lock.timeout)과 실패 시 처리 확인",
+                        "Check the lock timeout hint (jakarta.persistence.lock.timeout) and failure handling");
             }
             case ADD_UNIQUE -> {
                 fix("기존 중복 데이터 정리 후 UNIQUE 적용: " + target,
