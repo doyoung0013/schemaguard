@@ -112,6 +112,17 @@ runs:
         distribution: temurin
         java-version: '17'
 
+    # 캐시 키는 SchemaGuard 빌드 파일의 해시다. hashFiles() 는 작업 폴더 밖(Action 폴더)을 읽지 못하고,
+    # composite 안의 github.action_ref 는 지금 실행 중인 actions/cache 의 버전을 가리켜서 쓸 수 없다.
+    - name: Compute Gradle cache key
+      id: cachekey
+      if: steps.files.outputs.count != '0'
+      shell: bash
+      run: |
+        hash=$(cat "$GITHUB_ACTION_PATH/lib/build.gradle" "$GITHUB_ACTION_PATH/settings.gradle" \
+          "$GITHUB_ACTION_PATH/gradle/wrapper/gradle-wrapper.properties" | sha256sum | cut -c1-16)
+        echo "key=schemaguard-gradle-${RUNNER_OS}-${hash}" >> "$GITHUB_OUTPUT"
+
     - name: Cache SchemaGuard Gradle dependencies
       if: steps.files.outputs.count != '0'
       uses: actions/cache@v4
@@ -119,7 +130,7 @@ runs:
         path: |
           ~/.gradle/caches
           ~/.gradle/wrapper
-        key: schemaguard-gradle-${{ runner.os }}-${{ github.action_ref || 'local' }}
+        key: ${{ steps.cachekey.outputs.key }}
 
     - name: Build SchemaGuard
       if: steps.files.outputs.count != '0'
