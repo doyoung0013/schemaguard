@@ -1,0 +1,1 @@
+ALTER TABLE stocks DROP COLUMN status;

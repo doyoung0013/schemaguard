@@ -1,0 +1,95 @@
+# SchemaGuard Action 자체 테스트 (이 저장소에서 uses: ./ 로 실행)
+#   테스트 프로젝트: scripts/lock-experiment/project (재고 차감, 비관적 락 조회 포함)
+#   테스트 마이그레이션: action/test/V2~V4 (이력은 프로젝트의 db/V1__init.sql)
+name: SchemaGuard Action test
+
+on:
+  push:
+    paths: ['action.yml', 'action/**', 'lib/**', '.github/workflows/action-test.yml']
+  pull_request:
+    paths: ['action.yml', 'action/**', 'lib/**', '.github/workflows/action-test.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SOURCE: scripts/lock-experiment/project/src/main/java
+  MIGRATION_DIR: scripts/lock-experiment/project/db
+
+jobs:
+  scenarios:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # HIGH: 잠금·조회에 쓰는 컬럼 삭제 → 차단. fail-on: none 이라 단계는 성공하고 출력으로 확인한다
+      - id: high
+        uses: ./
+        with:
+          source: ${{ env.SOURCE }}
+          migration-dir: ${{ env.MIGRATION_DIR }}
+          files: action/test/V2__drop_status.sql
+          fail-on: none
+          artifact-name: reports-high
+
+      # MEDIUM: 비관적 락 조회가 쓰던 인덱스 삭제 → 경고만, 차단하지 않음
+      - id: lock
+        uses: ./
+        with:
+          source: ${{ env.SOURCE }}
+          migration-dir: ${{ env.MIGRATION_DIR }}
+          files: action/test/V3__drop_lock_index.sql
+          artifact-name: reports-lock
+
+      # 안전한 변경
+      - id: safe
+        uses: ./
+        with:
+          source: ${{ env.SOURCE }}
+          migration-dir: ${{ env.MIGRATION_DIR }}
+          files: action/test/V4__add_memo.sql
+          artifact-name: reports-safe
+
+      # 기본 fail-on(high)이면 HIGH 에서 실패해야 한다
+      - id: fail
+        continue-on-error: true
+        uses: ./
+        with:
+          source: ${{ env.SOURCE }}
+          migration-dir: ${{ env.MIGRATION_DIR }}
+          files: action/test/V2__drop_status.sql
+          upload-artifact: 'false'
+
+      - name: Check outputs
+        env:
+          HIGH_BLOCKED: ${{ steps.high.outputs.blocked }}
+          HIGH_COUNT: ${{ steps.high.outputs.high-count }}
+          LOCK_BLOCKED: ${{ steps.lock.outputs.blocked }}
+          LOCK_MEDIUM: ${{ steps.lock.outputs.medium-count }}
+          SAFE_BLOCKED: ${{ steps.safe.outputs.blocked }}
+          SAFE_ANALYZED: ${{ steps.safe.outputs.analyzed }}
+          FAIL_OUTCOME: ${{ steps.fail.outcome }}
+        run: |
+          set -x
+          [ "$HIGH_BLOCKED" = "true" ] && [ "$HIGH_COUNT" -gt 0 ]
+          [ "$LOCK_BLOCKED" = "false" ] && [ "$LOCK_MEDIUM" -ge 2 ]
+          [ "$SAFE_BLOCKED" = "false" ] && [ "$SAFE_ANALYZED" = "1" ]
+          [ "$FAIL_OUTCOME" = "failure" ]
+
+  # pull_request 에서 변경 파일 찾기 (fetch-depth 기본값 1 그대로). 이 PR 이 action/test 를 바꾸지 않았으면 0개
+  pr-detect:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: detect
+        uses: ./
+        with:
+          source: ${{ env.SOURCE }}
+          migration-dir: action/test
+          history: 'false'
+          fail-on: none
+      - env:
+          ANALYZED: ${{ steps.detect.outputs.analyzed }}
+        run: echo "analyzed=$ANALYZED"; [ -n "$ANALYZED" ]

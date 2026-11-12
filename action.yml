@@ -1,0 +1,172 @@
+name: SchemaGuard
+description: >-
+  Spring Boot + JPA 프로젝트의 SQL 마이그레이션이 영향을 주는 API 를 PR 단계에서 찾고,
+  HIGH 위험(런타임 오류, 조용한 중복 저장)이나 읽지 못한 SQL 이 있으면 병합을 막는다.
+author: doyoung0013
+branding:
+  icon: shield
+  color: blue
+
+# 사용 예 (검사 대상 프로젝트의 .github/workflows/schemaguard.yml)
+#
+#   on: pull_request
+#   jobs:
+#     schema-check:
+#       runs-on: ubuntu-latest
+#       steps:
+#         - uses: actions/checkout@v4
+#         - uses: doyoung0013/schemaguard@v1
+#           with:
+#             source: src/main/java
+#             migration-dir: src/main/resources/db/migration
+#
+# fetch-depth 를 바꿀 필요는 없다. 비교 기준(PR 의 base 커밋)은 이 Action 이 직접 가져온다.
+
+inputs:
+  source:
+    description: Java 소스 루트 (저장소 기준 경로)
+    default: src/main/java
+  migration-dir:
+    description: SQL 마이그레이션 폴더 (저장소 기준 경로). PR 에서 이 폴더 안의 추가·수정된 .sql 을 검사한다
+    default: src/main/resources/db/migration
+  files:
+    description: >-
+      검사할 SQL 파일을 직접 지정한다 (저장소 기준 경로, 한 줄에 하나). 주면 PR 변경 파일을 찾지 않는다.
+      pull_request 가 아닌 이벤트(push, workflow_dispatch)에서 쓴다
+    default: ''
+  base:
+    description: 비교 기준 커밋 SHA. 비우면 pull_request 의 base 커밋
+    default: ''
+  history:
+    description: >-
+      true 면 migration-dir 의 이전 마이그레이션(파일 이름의 V 번호가 더 작은 것)을 읽어 DROP INDEX 의 대상을 찾는다.
+      파일 이름이 V<번호>__<설명>.sql 규칙이 아니면 false
+    default: 'true'
+  lock-scope:
+    description: true 면 인덱스 삭제가 비관적 락 조회의 잠금 범위를 넓히는지 본다 (MEDIUM 경고, 차단하지 않음)
+    default: 'true'
+  fail-on:
+    description: >-
+      실패로 끝낼 조건. high = HIGH 위험·읽지 못한 SQL·실행 오류 (기본),
+      parse-failure = 읽지 못한 SQL·실행 오류만, none = 실패하지 않고 결과만 남김
+    default: high
+  language:
+    description: 리포트 언어 (ko / en)
+    default: ko
+  upload-artifact:
+    description: true 면 JSON 리포트를 Artifact 로 올린다
+    default: 'true'
+  artifact-name:
+    description: Artifact 이름 (같은 job 에서 여러 번 쓰면 다르게)
+    default: schemaguard-reports
+
+outputs:
+  blocked:
+    description: "'true' 면 HIGH 위험, 읽지 못한 SQL 또는 실행 오류가 있음"
+    value: ${{ steps.summary.outputs.blocked }}
+  high-count:
+    description: HIGH 위험 영향 API 수 (모든 파일 합계)
+    value: ${{ steps.summary.outputs.high-count }}
+  medium-count:
+    description: MEDIUM 위험 영향 API 수 (잠금 범위 경고 포함)
+    value: ${{ steps.summary.outputs.medium-count }}
+  analyzed:
+    description: 검사한 SQL 파일 수
+    value: ${{ steps.summary.outputs.analyzed }}
+  report-dir:
+    description: JSON 리포트와 results.tsv 가 있는 폴더
+    value: ${{ steps.files.outputs.report-dir }}
+
+runs:
+  using: composite
+  steps:
+    # 입력값과 파일명은 ${{ }} 로 스크립트에 끼워 넣지 않고 환경변수로만 넘긴다 (PR 작성자가 정한 파일명으로 셸 주입 방지).
+    - name: Find SQL migrations to check
+      id: files
+      shell: bash
+      env:
+        INPUT_FILES: ${{ inputs.files }}
+        INPUT_BASE: ${{ inputs.base }}
+        INPUT_MIGRATION_DIR: ${{ inputs.migration-dir }}
+        PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      run: bash "$GITHUB_ACTION_PATH/action/find-migrations.sh"
+
+    # GitHub 호스팅 러너에는 JDK 17 이 설치되어 있다(JAVA_HOME_17_X64). 있으면 그것을 써서
+    # 사용자 job 의 JAVA_HOME 을 바꾸지 않는다. 없을 때만 setup-java 로 설치한다.
+    # (if: 의 env 컨텍스트에는 러너 머신의 환경변수가 없어서 셸에서 확인한다)
+    - name: Check for JDK 17
+      id: jdk
+      if: steps.files.outputs.count != '0'
+      shell: bash
+      run: |
+        if [ -n "${JAVA_HOME_17_X64:-}" ] && [ -x "$JAVA_HOME_17_X64/bin/java" ]; then
+          echo "found=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "found=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Set up JDK 17 (only if the runner has none)
+      if: steps.files.outputs.count != '0' && steps.jdk.outputs.found != 'true'
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '17'
+
+    - name: Cache SchemaGuard Gradle dependencies
+      if: steps.files.outputs.count != '0'
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+        key: schemaguard-gradle-${{ runner.os }}-${{ github.action_ref || 'local' }}
+
+    - name: Build SchemaGuard
+      if: steps.files.outputs.count != '0'
+      shell: bash
+      run: |
+        export JAVA_HOME="${JAVA_HOME_17_X64:-$JAVA_HOME}"
+        bash "$GITHUB_ACTION_PATH/gradlew" -p "$GITHUB_ACTION_PATH" --no-daemon -q installDist
+
+    # 판정은 다음 단계에서 한다. 여기서는 모든 파일을 끝까지 분석하고 결과만 남긴다.
+    - name: Run SchemaGuard
+      if: steps.files.outputs.count != '0'
+      shell: bash
+      env:
+        INPUT_SOURCE: ${{ inputs.source }}
+        INPUT_MIGRATION_DIR: ${{ inputs.migration-dir }}
+        INPUT_HISTORY: ${{ inputs.history }}
+        INPUT_LOCK_SCOPE: ${{ inputs.lock-scope }}
+        SCHEMAGUARD_LANG: ${{ inputs.language }}
+        REPORT_DIR: ${{ steps.files.outputs.report-dir }}
+        FILE_LIST: ${{ steps.files.outputs.list }}
+      run: bash "$GITHUB_ACTION_PATH/action/run-schemaguard.sh"
+
+    - name: Write summary
+      id: summary
+      shell: bash
+      env:
+        REPORT_DIR: ${{ steps.files.outputs.report-dir }}
+        FILE_COUNT: ${{ steps.files.outputs.count }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+      run: python3 "$GITHUB_ACTION_PATH/action/summary.py"
+
+    - name: Upload SchemaGuard reports
+      if: always() && inputs.upload-artifact == 'true' && steps.files.outputs.count != '0'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ steps.files.outputs.report-dir }}/
+        retention-days: 30
+
+    - name: Check result
+      shell: bash
+      env:
+        SHOULD_FAIL: ${{ steps.summary.outputs.should-fail }}
+        REASON: ${{ steps.summary.outputs.reason }}
+      run: |
+        if [ "$SHOULD_FAIL" = "true" ]; then
+          echo "::error title=SchemaGuard::$REASON"
+          exit 1
+        fi
+        echo "SchemaGuard: $REASON"
